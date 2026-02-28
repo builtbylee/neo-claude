@@ -5,12 +5,11 @@ from __future__ import annotations
 
 from datetime import date
 
-import typer
 import structlog
+import typer
 
 from startuplens.config import get_settings
-from startuplens.db import get_connection, execute_query
-from startuplens.feature_store.store import write_features_batch
+from startuplens.db import execute_query, get_connection
 from startuplens.feature_store.extractors import (
     extract_campaign_features,
     extract_company_features,
@@ -20,6 +19,7 @@ from startuplens.feature_store.extractors import (
     extract_team_features,
     extract_terms_features,
 )
+from startuplens.feature_store.store import write_features_batch
 
 logger = structlog.get_logger(__name__)
 app = typer.Typer()
@@ -52,12 +52,13 @@ def main(
         entities = execute_query(
             conn,
             """
-            SELECT
+            SELECT DISTINCT ON (ce.id)
                 ce.id::text AS entity_id,
                 c.*
             FROM canonical_entities ce
             JOIN entity_links el ON el.entity_id = ce.id
-            JOIN companies c ON c.id::text = el.source_identifier AND el.source = 'companies'
+            JOIN companies c ON c.id::text = el.source_identifier AND el.source = c.source
+            ORDER BY ce.id, el.confidence DESC
             """,
         )
 

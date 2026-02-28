@@ -7,7 +7,6 @@ import pytest
 from startuplens.backtest.baselines import ScoredDeal
 from startuplens.backtest.simulator import (
     InvestorPolicy,
-    SimulatedPortfolio,
     simulate_portfolio,
     simulate_walk_forward,
 )

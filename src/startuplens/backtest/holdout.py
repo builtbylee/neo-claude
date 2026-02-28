@@ -52,7 +52,7 @@ def quarantine_holdout(
     query = """
         INSERT INTO backtest_holdout (id, entity_id, company_id, holdout_window)
         VALUES (%s, %s, %s, %s)
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (entity_id, holdout_window) DO NOTHING
     """
     return execute_many(conn, query, rows)
 

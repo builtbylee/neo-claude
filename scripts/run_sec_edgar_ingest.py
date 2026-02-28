@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import typer
 import structlog
+import typer
 
 from startuplens.config import get_settings
 from startuplens.db import get_connection

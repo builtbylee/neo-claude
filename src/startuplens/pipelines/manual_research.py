@@ -66,11 +66,12 @@ def ingest_manual_batch(conn: Any, records: list[dict]) -> int:
 
     company_rows = [
         (
-            r["registration_number"],
             r["company_name"],
-            r.get("incorporation_date"),
             r["country"],
             r.get("sector"),
+            r.get("incorporation_date"),
+            "manual_research",
+            r.get("registration_number"),
         )
         for r in records
     ]
@@ -79,20 +80,22 @@ def ingest_manual_batch(conn: Any, records: list[dict]) -> int:
         conn,
         """
         INSERT INTO companies (
-            registration_number, legal_name, incorporation_date, country, sic_codes
-        ) VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (registration_number) DO NOTHING
+            name, country, sector, founding_date, source, source_id
+        ) VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (source, source_id) WHERE source_id IS NOT NULL DO NOTHING
         """,
         company_rows,
     )
 
     outcome_rows = [
         (
-            r["company_name"],
             r["outcome"],
             r.get("outcome_detail"),
+            r.get("sector"),
+            r["country"],
+            "seed",
             r["label_tier"],
-            r.get("notes"),
+            "manual_research",
         )
         for r in records
     ]
@@ -101,9 +104,9 @@ def ingest_manual_batch(conn: Any, records: list[dict]) -> int:
         conn,
         """
         INSERT INTO crowdfunding_outcomes (
-            company_name, outcome, outcome_detail, label_quality_tier, notes
-        ) VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT DO NOTHING
+            outcome, outcome_detail, sector, country,
+            stage_bucket, label_quality_tier, data_source
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
         outcome_rows,
     )

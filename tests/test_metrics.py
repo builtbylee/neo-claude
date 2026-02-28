@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from startuplens.backtest.metrics import (
-    MetricResult,
     all_must_pass_met,
     compute_ece,
     evaluate_backtest,
 )
-
 
 # ------------------------------------------------------------------
 # ECE computation

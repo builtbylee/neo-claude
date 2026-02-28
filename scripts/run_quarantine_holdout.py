@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-import typer
 import structlog
+import typer
 
+from startuplens.backtest.holdout import get_holdout_summary, quarantine_holdout
 from startuplens.config import get_settings
-from startuplens.db import get_connection, execute_query
-from startuplens.backtest.holdout import quarantine_holdout, get_holdout_summary
+from startuplens.db import execute_query, get_connection
 
 logger = structlog.get_logger(__name__)
 app = typer.Typer()
@@ -34,7 +34,7 @@ def main(
             SELECT DISTINCT ce.id::text AS entity_id
             FROM canonical_entities ce
             JOIN entity_links el ON el.entity_id = ce.id
-            JOIN companies c ON c.id::text = el.source_identifier AND el.source = 'companies'
+            JOIN companies c ON c.id::text = el.source_identifier AND el.source = c.source
             JOIN funding_rounds fr ON fr.company_id = c.id
             WHERE fr.round_date BETWEEN %s AND %s
             """,

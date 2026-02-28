@@ -22,14 +22,29 @@ from startuplens.pipelines.sec_edgar import (
     parse_form_c_filings,
     run_sec_pipeline,
 )
+from startuplens.pipelines.sec_form_d import (
+    cross_reference_sec_filings,
+    download_form_d_dataset,
+    ingest_form_d_batch,
+    normalize_form_d_record,
+    parse_form_d_dataset,
+    run_form_d_pipeline,
+)
 
 __all__ = [
-    # SEC EDGAR
+    # SEC EDGAR Form C
     "download_form_c_index",
     "ingest_form_c_batch",
     "normalize_form_c_record",
     "parse_form_c_filings",
     "run_sec_pipeline",
+    # SEC EDGAR Form D
+    "cross_reference_sec_filings",
+    "download_form_d_dataset",
+    "ingest_form_d_batch",
+    "normalize_form_d_record",
+    "parse_form_d_dataset",
+    "run_form_d_pipeline",
     # Companies House
     "run_companies_house_pipeline",
     # Academic datasets

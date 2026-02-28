@@ -27,7 +27,6 @@ from startuplens.entity_resolution.validation import (
     generate_validation_report,
 )
 
-
 # =========================================================================
 # normalize_name
 # =========================================================================

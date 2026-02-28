@@ -5,14 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-import pytest
-
 from startuplens.backtest.splitter import (
     TimeWindow,
     generate_walk_forward_windows,
     split_entities_by_window,
 )
-
 
 # ------------------------------------------------------------------
 # Window generation

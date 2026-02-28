@@ -9,9 +9,9 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from startuplens.pipelines.sec_edgar import (
-    _RateLimiter,
     _classify_instrument_type,
     _classify_round_type,
+    _RateLimiter,
     download_form_c_index,
     ingest_form_c_batch,
     normalize_form_c_record,

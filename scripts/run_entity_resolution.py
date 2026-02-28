@@ -5,11 +5,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import typer
 import structlog
+import typer
 
 from startuplens.config import get_settings
-from startuplens.db import get_connection, execute_query
+from startuplens.db import execute_query, get_connection
 from startuplens.entity_resolution.resolver import run_entity_resolution, run_probabilistic_pass
 
 logger = structlog.get_logger(__name__)
@@ -35,12 +35,12 @@ def main(
             conn,
             """
             SELECT
-                c.id::text AS source_id,
-                c.legal_name AS name,
+                c.id::text AS source_identifier,
+                c.name,
                 c.country,
-                'companies' AS source_system
+                c.source
             FROM companies c
-            LEFT JOIN entity_links el ON el.source = 'companies' AND el.source_identifier = c.id::text
+            LEFT JOIN entity_links el ON el.source = c.source AND el.source_identifier = c.id::text
             WHERE el.id IS NULL
             """,
         )
@@ -49,6 +49,7 @@ def main(
 
         if records:
             stats = run_entity_resolution(conn, records)
+            conn.commit()
             logger.info("deterministic_resolution_complete", **stats)
 
         if run_probabilistic:
@@ -56,6 +57,7 @@ def main(
                 conn,
                 settings_path=dedupe_settings,
             )
+            conn.commit()
             logger.info("probabilistic_resolution_complete", **prob_stats)
 
     finally:

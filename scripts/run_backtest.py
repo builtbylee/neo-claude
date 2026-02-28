@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from datetime import date
 
-import typer
 import structlog
+import typer
 
 from startuplens.backtest.baselines import (
     ScoredDeal,
@@ -17,9 +17,9 @@ from startuplens.backtest.baselines import (
 from startuplens.backtest.metrics import all_must_pass_met, evaluate_backtest
 from startuplens.backtest.provenance import log_backtest_run
 from startuplens.backtest.simulator import InvestorPolicy, simulate_portfolio
-from startuplens.backtest.splitter import generate_walk_forward_windows, split_entities_by_window
+from startuplens.backtest.splitter import generate_walk_forward_windows
 from startuplens.config import get_settings
-from startuplens.db import get_connection, execute_query
+from startuplens.db import execute_query, get_connection
 
 logger = structlog.get_logger(__name__)
 app = typer.Typer()
@@ -109,17 +109,21 @@ def main(
         momentum_portfolio = simulate_portfolio(momentum_scored, policy)
 
         # Evaluate metrics (using random baseline as reference)
+        # Compute ratios that evaluate_backtest expects
+        random_moic = random_portfolio.moic or 1.0
+        moic_vs_random = 1.0 / random_moic if random_moic else 1.0  # placeholder model MOIC
+        random_fail = random_portfolio.failure_rate or 1.0
+        fail_vs_random = heuristic_portfolio.failure_rate / random_fail if random_fail else 1.0
+
         metrics = evaluate_backtest(
             survival_auc=0.5,  # Placeholder — real model AUC goes here
             calibration_ece=0.5,
-            portfolio_moic=1.0,
-            random_moic=random_portfolio.moic or 1.0,
-            portfolio_failure_rate=heuristic_portfolio.failure_rate,
-            random_failure_rate=random_portfolio.failure_rate,
-            claude_text_auc=0.5,
-            progress_model_auc=0.5,
+            portfolio_moic_vs_random=moic_vs_random,
+            portfolio_failure_rate_vs_random=fail_vs_random,
+            claude_text_score_auc=0.5,
+            progress_auc=0.5,
             abstention_rate=heuristic_portfolio.abstention_rate,
-            sector_max_deviation=0.0,
+            max_sector_share=0.0,
         )
 
         all_passed = all_must_pass_met(metrics)

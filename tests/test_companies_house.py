@@ -94,8 +94,8 @@ class TestGetVerifiedCompanyNumbers:
         with patch(
             "startuplens.pipelines.companies_house.execute_query",
             return_value=[
-                {"registration_number": "12345678"},
-                {"registration_number": "87654321"},
+                {"source_id": "12345678"},
+                {"source_id": "87654321"},
             ],
         ):
             result = get_verified_company_numbers(conn)

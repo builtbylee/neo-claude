@@ -119,11 +119,13 @@ def ingest_company_batch(conn: Any, companies: list[dict]) -> int:
 
     rows = [
         (
-            c["company_number"],
             c["company_name"],
-            c.get("incorporation_date"),
-            ",".join(c.get("sic_codes", [])),
             c["country"],
+            ",".join(c.get("sic_codes", [])) or None,
+            c.get("sic_codes", [None])[0] if c.get("sic_codes") else None,
+            c.get("incorporation_date"),
+            "companies_house",
+            c["company_number"],
             c.get("company_status"),
         )
         for c in companies
@@ -131,12 +133,12 @@ def ingest_company_batch(conn: Any, companies: list[dict]) -> int:
 
     query = """
         INSERT INTO companies (
-            registration_number, legal_name, incorporation_date,
-            sic_codes, country, status
-        ) VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (registration_number) DO UPDATE SET
-            status = EXCLUDED.status,
-            legal_name = EXCLUDED.legal_name
+            name, country, sector, sic_code,
+            founding_date, source, source_id, current_status
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (source, source_id) WHERE source_id IS NOT NULL DO UPDATE SET
+            current_status = EXCLUDED.current_status,
+            name = EXCLUDED.name
     """
     return execute_many(conn, query, rows)
 
@@ -145,9 +147,9 @@ def get_verified_company_numbers(conn: Any) -> set[str]:
     """Return company numbers that have already been verified/ingested."""
     rows = execute_query(
         conn,
-        "SELECT registration_number FROM companies WHERE country = 'UK'",
+        "SELECT source_id FROM companies WHERE source = 'companies_house'",
     )
-    return {r["registration_number"] for r in rows}
+    return {r["source_id"] for r in rows}
 
 
 def run_companies_house_pipeline(

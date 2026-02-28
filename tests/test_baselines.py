@@ -11,7 +11,6 @@ from startuplens.backtest.baselines import (
     sector_momentum_baseline,
 )
 
-
 # ------------------------------------------------------------------
 # Random baseline
 # ------------------------------------------------------------------

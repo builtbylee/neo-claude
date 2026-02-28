@@ -294,7 +294,8 @@ def ingest_form_c_batch(conn: psycopg.Connection, records: list[dict]) -> int:
                 """
                 INSERT INTO companies (name, country, sector, source, source_id, sic_code)
                 VALUES (%(name)s, %(country)s, %(sector)s, %(source)s, %(source_id)s, %(sic_code)s)
-                ON CONFLICT (source, source_id) DO UPDATE SET
+                ON CONFLICT (source, source_id) WHERE source_id IS NOT NULL
+                DO UPDATE SET
                     name = EXCLUDED.name,
                     sector = EXCLUDED.sector
                 RETURNING id

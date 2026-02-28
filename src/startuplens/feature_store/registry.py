@@ -151,15 +151,20 @@ def generate_materialized_view_sql() -> str:
     columns = []
     for feat in FEATURE_REGISTRY:
         if feat.dtype == "numeric":
-            cast = "::numeric"
+            col = (
+                f"  MAX(CASE WHEN feature_name = '{feat.name}' "
+                f"THEN (feature_value->>'value')::numeric END) AS {feat.name}"
+            )
         elif feat.dtype == "boolean":
-            cast = "::boolean"
+            col = (
+                f"  BOOL_OR(CASE WHEN feature_name = '{feat.name}' "
+                f"THEN (feature_value->>'value')::boolean END) AS {feat.name}"
+            )
         else:
-            cast = "::text"
-        col = (
-            f"  MAX(CASE WHEN feature_name = '{feat.name}' "
-            f"THEN (feature_value->>'value'){cast} END) AS {feat.name}"
-        )
+            col = (
+                f"  MAX(CASE WHEN feature_name = '{feat.name}' "
+                f"THEN (feature_value->>'value')::text END) AS {feat.name}"
+            )
         columns.append(col)
 
     cols_sql = ",\n".join(columns)

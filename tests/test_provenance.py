@@ -3,6 +3,8 @@
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from startuplens.backtest.provenance import (
     compare_runs,
     get_backtest_run,
@@ -204,6 +206,3 @@ class TestCompareRuns:
         assert "auc" in result["metrics"]
         assert "ece" in result["metrics"]
         assert result["metrics"]["auc"]["run_b"] is None
-
-
-import pytest
