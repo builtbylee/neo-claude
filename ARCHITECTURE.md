@@ -1,4 +1,4 @@
-# StartupLens v5 — Architecture Plan
+# StartupLens v6 — Architecture Plan
 
 ## What this tool does
 
@@ -264,6 +264,11 @@ Every feature must be timestamped to prevent data leakage. The feature store enf
 *Terms/pricing features:*
 - Entry valuation vs sector/stage benchmarks
 - Ownership at entry %, preference stack, pro-rata rights
+- Instrument type (equity, SAFE, convertible note, ASA)
+- SAFE/convertible terms: valuation cap, discount rate, MFN clause
+- Liquidation preference multiple and seniority position
+- Pro-rata rights (exists, amount, exercise deadline)
+- Option pool size and post-money vs pre-money treatment
 
 *Traction proxy features:*
 - Google Trends momentum, web traffic rank change
@@ -320,7 +325,7 @@ A UK seed-stage fintech raising on Crowdcube exists in a fundamentally different
 - Seed: total prior funding < $5M OR raise amount < $2M OR explicitly labelled seed/pre-seed
 - Early Growth: total prior funding $5-50M OR raise amount $2-20M OR Series A/B label
 
-**Minimum training sample per family:** 200 labelled outcomes. If a family has fewer than 200 Tier 1+2 labels, it falls back to a pooled model with a stage-country indicator feature (and confidence is downgraded).
+**Minimum training sample per family:** 200 labelled outcomes (Tier 1+2 combined). If a family has fewer than 200 labels, it falls back to a pooled model with a stage-country indicator feature (and confidence is downgraded). Additionally, calibration metrics (ECE) are unreliable below 100 test-set outcomes — model families with fewer than 100 test-set labels use wider confidence bands and cannot trigger the kill-switch (see Phase 7).
 
 #### 2b. Model Architecture (per family)
 
@@ -384,8 +389,9 @@ A model that says "70% chance of survival" should be right ~70% of the time. Cal
 
 **Calibration health monitoring (post-deployment):**
 - Track predicted vs observed frequencies on a rolling basis as new outcomes arrive
-- If ECE exceeds 0.10 for any model family, trigger recalibration alert
-- If ECE exceeds 0.15, activate kill-switch (see Phase 5)
+- **Minimum sample gate:** ECE is only actionable when computed on >= 100 labelled outcomes in the test window. Below this, report ECE with a "low-confidence estimate" flag and do not trigger automated alerts or kill-switch. Use bootstrap confidence intervals on ECE when sample size is 50-100.
+- If ECE exceeds 0.10 for any model family (with >= 100 outcomes), trigger recalibration alert
+- If ECE exceeds 0.15 (with >= 100 outcomes), activate kill-switch (see Phase 7)
 
 **Model release gate:**
 - A model family cannot go live unless:
@@ -616,10 +622,20 @@ This is the investment-level analysis layer. A great company at a bad price is a
 - Flag: "Priced at 40x revenue. Sector median for this stage is 15x. Valuation is aggressive."
 
 **Dilution modelling:**
-- Input: current equity offered %, pre-money valuation
-- Estimate future rounds needed before exit (based on sector/stage norms):
+- Input: current equity offered %, pre-money valuation, instrument type, terms
+- **Equity rounds:** straightforward dilution based on future round assumptions
   - Seed -> Series A -> Series B -> exit = ~60-75% total dilution
   - Seed -> Series A -> exit = ~40-55% total dilution
+- **SAFEs/convertible notes:** model conversion scenarios
+  - If valuation cap: convert at min(cap, next-round valuation) — cap protects your price
+  - If discount only: convert at (1 - discount%) x next-round price
+  - If MFN: convert at best terms of any subsequent SAFE before the priced round
+  - Model the scenario where conversion round is a down round (cap becomes irrelevant, discount matters more)
+  - Flag: multiple SAFE/convertible layers above you in the stack increase dilution risk
+- **Liquidation preference stack:** model the waterfall
+  - If preferred shares with 1x non-participating preference (most common ECF): investors get back 1x before common, then common shares split remainder
+  - If participating preferred: investors get 1x PLUS pro-rata share of remainder (much worse for you as a crowdfunding investor who typically gets common/ordinary shares)
+  - If multiple preference layers from prior rounds: model how much exit value is consumed before your shares see any return
 - Calculate investor ownership at exit scenarios
 - Output: "Your 2% ownership at entry becomes ~0.5-0.8% at exit after dilution"
 
@@ -633,6 +649,16 @@ Instead of fixed bear/base/bull labels, model a return distribution based on the
 - Factor in EIS/SEIS tax relief impact on effective return at each percentile
 - Compute expected value (probability-weighted mean return)
 
+**Tax relief modelling (UK — EIS/SEIS):**
+- EIS: 30% income tax relief on investment, CGT exemption on gains, loss relief on failures
+- SEIS: 50% income tax relief, CGT exemption, CGT reinvestment relief
+- Applied automatically when EIS/SEIS eligibility is indicated
+
+**Tax relief modelling (US — QSBS):**
+- Section 1202 QSBS: if held >= 5 years and company is a qualified small business (C-corp, <$50M gross assets at issuance), exclude up to $10M or 10x basis from federal capital gains tax
+- Applied when: US company, C-corp structure, gross assets < $50M (estimated from financials), equity instrument (not SAFE — SAFEs may not qualify until conversion)
+- Flag when QSBS qualification is uncertain: "QSBS eligibility depends on C-corp status and asset threshold at issuance — verify with the company"
+
 Example output:
 ```
 Return Distribution (after dilution, before tax relief):
@@ -641,11 +667,17 @@ Return Distribution (after dilution, before tax relief):
   P90 (upside):     4.8x  (acquisition at 8x last round)
   Expected value:   1.2x
 
-With EIS 30% income tax relief:
+UK (with EIS 30% income tax relief):
   Effective P10:    0.3x  (loss relief recovers 30% of investment)
   Effective P50:    0.6x
   Effective P90:    5.1x
   Expected value:   1.5x
+
+US (with QSBS, if qualified and held 5yr):
+  Effective P10:    0.0x  (no loss relief equivalent)
+  Effective P50:    0.3x
+  Effective P90:    4.8x  (gains excluded from federal CGT)
+  Expected value:   1.2x  (pre-state-tax)
 ```
 
 **Exit path assessment:**
@@ -667,7 +699,7 @@ Abstention is first-class. A deal cannot receive a positive recommendation unles
 | Model confidence | Survival model prediction entropy < 0.9 | Route to **Abstain** — "Model cannot distinguish this company from base rate" |
 | Prediction uncertainty | P90 - P10 return spread < 50x | Route to **Abstain** — "Return range too wide for meaningful recommendation" |
 | Calibration health | Current model family ECE < 0.10 | Route to **Abstain** — "Model calibration degraded, recommendations suspended" |
-| Evidence quality | >= 3 independent data sources confirm key claims | Route to **Low Confidence** — score shown with prominent warning |
+| Evidence quality | >= 3 independent data sources confirm key claims | Route to **Abstain** — "Key claims unverifiable from available sources" |
 
 **Hard kill criteria (override score regardless of value):**
 
@@ -689,9 +721,30 @@ Abstention is first-class. A deal cannot receive a positive recommendation unles
 | **Pass** | Score < 40, or kill criteria triggered | Log to anti-portfolio with reason |
 | **Abstain** | One or more gates failed | Explicitly: "I don't have enough data to tell you" |
 
-#### 3e. Scoring Engine
+#### 3e. Portfolio Policy Constraints
 
-**Rubric Structure (7 categories — revised weights):**
+The decision engine enforces investor-level constraints before any recommendation. These are configurable in the `investor_policy` table but default to conservative settings.
+
+**Default policy:**
+
+| Constraint | Default value | Enforcement |
+|-----------|--------------|-------------|
+| Max investments per year | 2 | If already at cap, all "Invest" recommendations downgrade to "Watch — annual cap reached" |
+| Check size | £10,000 (fixed) | Displayed in return calculations; not variable per deal |
+| Max per sector per year | 1 | If already invested in this sector this year, flag: "Sector concentration — already invested in [sector] this year" |
+| No forced deployment | Enabled | Zero investments in a year is explicitly valid. The tool never pressures you to invest. |
+| Compliance hard blocks | Enabled | Kill criteria cannot be overridden regardless of policy |
+
+**How it works at evaluation time:**
+- After scoring and gate checks, but before displaying the final recommendation, the policy engine checks portfolio state
+- If the annual cap is reached, the recommendation changes but the score is preserved (you can still see how good the deal is — you just can't act on it this year without overriding the cap)
+- If you override a policy constraint, the override is logged in the recommendation_log with your reason
+
+**Why this matters:** Without hard constraints, a run of high-scoring deals can lead to overcommitting capital in a single vintage or sector. The policy engine is the discipline layer that the scoring engine can't provide on its own.
+
+#### 3f. Scoring Engine
+
+**Rubric Structure (7 categories):**
 
 ```
 OVERALL SCORE (0-100) +/- confidence range
@@ -791,7 +844,7 @@ OVERALL SCORE (0-100) +/- confidence range
 
 Additionally, if the company's feature profile is a statistical outlier (far from any training data cluster), confidence is downgraded one level regardless of completeness, with an explicit note: *"This company's profile is unusual -- few historical comparables exist in the training data."*
 
-#### 3f. Alternative Data Enrichment
+#### 3g. Alternative Data Enrichment
 
 When the user submits a company name + website URL, the API routes automatically fetch signals from free sources.
 
@@ -829,7 +882,16 @@ When the user submits a company name + website URL, the API routes automatically
 | Innovate UK grants | UKRI funded projects CSV | Checkbox + amount |
 | Government contracts won | Contracts Finder | Checkbox + count |
 
-#### 3g. Additional Input Fields (Deep Score Form)
+**Data licensing and retention:**
+Not all "free" APIs permit all uses. Key restrictions to respect:
+- **SimilarWeb DigitalRank:** free tier permits personal/non-commercial use only. If the tool is opened to others, requires paid plan.
+- **Trustpilot API:** rate-limited, requires attribution. Do not cache reviews beyond 24 hours.
+- **Google Play / App Store scrapers:** unofficial libraries, no formal API. May break without notice. Do not redistribute scraped data.
+- **PRAW (Reddit):** Reddit API terms require attribution and prohibit commercial use above free tier limits.
+- **Companies House / FCA / SEC EDGAR:** public government data, no usage restrictions.
+- **General rule:** cache API responses for max 24 hours per evaluation. Do not build a persistent mirror of any third-party dataset. Store only the extracted signal values (e.g., "Trustpilot 4.2/5, 89 reviews"), not raw API responses.
+
+#### 3h. Additional Input Fields (Deep Score Form)
 
 Beyond the standard form sections (Company, Financials, Deal Terms, Investment Signals, Traction, Team, Market, Pitch Text), the Deep Score form adds:
 
@@ -1027,12 +1089,12 @@ Proactive deal discovery rather than passive evaluation.
 
 If any of these conditions trigger, the system automatically downgrades all recommendations to "Watch" and displays a prominent banner:
 
-| Trigger | Threshold | Recovery |
-|---------|-----------|----------|
-| Calibration collapse | ECE > 0.15 for any model family | Retrain + recalibrate + pass release gate |
-| Data source failure | Primary data source unavailable > 7 days | Fix pipeline + verify data currency |
-| Prompt drift | Reference pitch set mean score drifts > 15 points | Review + update prompt + recalibrate |
-| Systematic error | 3+ consecutive "Invest" recommendations result in failure within 18 months | Full model review + parameter audit |
+| Trigger | Threshold | Minimum sample | Recovery |
+|---------|-----------|---------------|----------|
+| Calibration collapse | ECE > 0.15 for any model family | >= 100 test outcomes (below this, ECE is too noisy to trigger on) | Retrain + recalibrate + pass release gate |
+| Data source failure | Primary data source unavailable > 7 days | N/A | Fix pipeline + verify data currency |
+| Prompt drift | Reference pitch set mean score drifts > 15 points | N/A (uses fixed 20-pitch reference set) | Review + update prompt + recalibrate |
+| Systematic error | 3+ consecutive "Invest" recommendations result in failure within 18 months | >= 5 resolved "Invest" recommendations | Full model review + parameter audit |
 
 The kill-switch is a safety net, not a routine tool. Its existence is a commitment to decision reliability over model ego.
 
@@ -1045,6 +1107,174 @@ Every recommendation is logged with:
 - Eventual outcome (linked when known)
 
 This log is the foundation for all post-hoc analysis. It enables you to ask: "For every deal where I overrode the model, what happened?"
+
+---
+
+## Backtesting Plan
+
+The backtest harness is built in Phase 0 (before model training), because it defines what "good" looks like before you start training. If you can't measure success before you build, you're guessing.
+
+### Phase 0: Backtest Infrastructure (before model training)
+
+Build before any model training begins.
+
+**0a. Walk-forward splitter**
+- Implement rolling time-window splits, not a single train/test partition:
+  - Train 2016-2018, test 2019
+  - Train 2016-2019, test 2020
+  - Train 2016-2020, test 2021
+  - Train 2016-2021, test 2022
+  - Train 2016-2022, test 2023-2025
+- This reveals whether the model is consistently good or got lucky in one period
+
+**0b. Test set quarantine**
+- Create the final test set (2023-2025 outcomes) before any model training begins
+- Store in a separate table (`backtest_holdout`) that the training pipeline physically cannot access
+- Run final evaluation exactly once per model candidate — no iterative peeking
+- Log every test set access to prevent "just one more look" overfitting
+
+**0c. Baseline generators**
+- Implement three baselines that every model must beat:
+  - **Random selection:** pick random deals from the same platform/period
+  - **Simple heuristic:** "has revenue + institutional co-investor + EIS eligible"
+  - **Sector momentum:** invest in the sector with the most successful exits in the prior 2 years
+- Baselines use the same portfolio constraints (max 2/year, max 1/sector/year)
+
+**0d. Portfolio simulator**
+- Simulate realistic investment decisions under policy constraints
+- Input: scored deal list for a vintage period + investor policy
+- Process: rank by score, apply policy constraints, select top eligible deals
+- Output: simulated portfolio with eventual outcomes
+- Run for each walk-forward window
+
+**0e. Metric computation with pass/fail thresholds**
+
+Every backtest run is evaluated against predefined thresholds. The model does not ship unless all "must pass" thresholds are met.
+
+| Metric | Threshold | Must pass? | What failure means |
+|--------|-----------|-----------|-------------------|
+| Survival model AUC (out-of-time, per family) | >= 0.65 | Yes | Model can't distinguish survivors from failures. Investigate feature engineering. |
+| Calibration ECE (out-of-time, per family) | < 0.08 | Yes | Predicted probabilities unreliable. Apply Platt scaling or investigate distribution shift. |
+| Portfolio simulation MOIC vs random baseline | > 1.3x random | Yes | Signal isn't worth the complexity. Model-selected portfolio must return 30%+ more than random. |
+| Portfolio simulation failure rate vs random | < 0.7x random failure rate | Yes | Model must reduce failure exposure by 30%+ vs random. |
+| Claude text score AUC on historical pitches | >= 0.60 (on 30+ samples) | Yes | Text analysis can't discriminate. Reduce text weight from 20% or investigate prompt quality. |
+| Progress model AUC (out-of-time, per family) | >= 0.58 | No (advisory) | 18-month model adds no value. Drop it or simplify to a heuristic. |
+| Simulated abstention rate | 10-40% of evaluated deals | No (advisory) | Below 10%: gates too loose. Above 40%: gates too strict, tool unusable. |
+| Sector bias | No single sector > 50% of "Invest" recommendations | No (advisory) | Model may be overfit to one sector's success pattern. |
+
+**0f. Historical alt data reconstruction**
+
+Several alt data signals can be reconstructed historically, despite my earlier claim that "alt data can't be backtested." A DE would build as-of reconstruction pipelines for these:
+
+| Signal | Historical source | Reconstructable? |
+|--------|------------------|-----------------|
+| Website existence + change frequency | Wayback Machine CDX API (timestamped snapshots) | Yes — full history |
+| GitHub stars + commits | GitHub API (commit history is timestamped, star history via stargazers endpoint with timestamps) | Yes — full history |
+| Companies House filings + charges + directors | Companies House API (all events are timestamped) | Yes — full history |
+| Press coverage volume + tone | GDELT archive (queryable by date range) | Yes — back to 2015 |
+| npm download counts | npm BigQuery dataset (daily downloads by package) | Yes — back to 2015 |
+| PyPI downloads | pypistats.org (180-day rolling window) | Partial — recent only |
+| Google Trends | Google Trends (can specify date ranges) | Yes — but rate limited |
+| FCA authorisation history | FCA Register (historical permissions timestamped) | Yes — full history |
+| App store ratings | Not available historically via free APIs | No |
+| Job postings | Adzuna does not offer historical data | No |
+| Trustpilot, Reddit, ProductHunt | No historical APIs | No |
+
+For backtesting purposes, use the ~8 reconstructable signals to build as-of feature vectors for historical companies. The ~7 non-reconstructable signals are excluded from the backtest (and their weight in the rubric is redistributed proportionally among available signals).
+
+**0g. Entity resolution validation**
+- Sample 200 entities from the entity resolution pipeline
+- Manually verify canonical matches (is SEC Company X actually the same as Companies House Company Y?)
+- Measure precision (% of auto-confirmed matches that are correct) — target: >= 95%
+- Measure recall (% of true matches the system found) — target: >= 80%
+- If precision < 95%, raise the entity-match confidence threshold
+- If recall < 80%, add more matching rules or lower the probabilistic threshold (with manual review for borderline cases)
+
+**0h. Backtest provenance log**
+
+Every backtest run is logged:
+
+```sql
+backtest_runs (
+  id serial PRIMARY KEY,
+  run_date timestamptz DEFAULT now(),
+  model_family text,
+  model_version_id integer,
+  data_snapshot_date date,
+  train_window text,                -- e.g., "2016-2020"
+  test_window text,                 -- e.g., "2021-2022"
+  features_active jsonb,            -- which feature families were included
+  metrics jsonb,                    -- all computed metrics
+  baselines jsonb,                  -- baseline results for comparison
+  passed boolean,                   -- did it meet all "must pass" thresholds?
+  notes text
+)
+```
+
+### During Phase 2: Model Training Backtests
+
+**Rolling walk-forward validation:**
+- Run all 5 time windows (0a above) for each stage-country model family
+- Check: is AUC consistent across windows, or does it drop in specific periods?
+- If AUC drops sharply in one window (e.g., 2021 — COVID/ZIRP regime), the model is regime-sensitive. Check whether macro regime features improve robustness.
+
+**Regime sensitivity analysis:**
+- Run the full backtest with and without macro regime features
+- Compare AUC and portfolio MOIC across different regime periods
+- If macro features don't improve out-of-time performance, drop them (complexity without value)
+
+**Feature ablation:**
+- For each feature family (campaign, company, team, financial, traction, terms, regulatory, regime), train a model without that family and compare AUC
+- If removing a family doesn't hurt AUC, the features are noise — remove them
+- If removing a family drops AUC significantly, those features are load-bearing — investigate individual feature importance within the family
+
+**Portfolio simulation:**
+- Run the portfolio simulator (0d) for each walk-forward window
+- Apply investor policy constraints (max 2/year, max 1/sector)
+- Compare model-selected portfolio against 3 baselines
+- Report: simulated MOIC, failure rate, abstention rate
+
+### During Phase 3: Claude Integration Backtests
+
+**Historical pitch recovery:**
+- Use Wayback Machine to recover archived crowdfunding platform pages for 30-50 companies with known outcomes
+- Also use SEC Form C "use of proceeds" text as a lower-quality substitute for pitch text
+- Target: 30+ recoverable pitches (10 from known successes, 10 from known failures, 10 mixed)
+
+**Claude text discrimination test:**
+- Run Claude Stage 1 on all recovered pitches
+- Measure: AUC of text_quality_score alone against outcome
+- Check individual dimensions: which text scores correlate most with survival? (Expected: claims_plausibility and risk_honesty, based on academic findings)
+- If AUC < 0.60, the text weight (20%) is too high — reduce or investigate prompt
+
+**Reference set calibration:**
+- Curate fixed set of 20 pitches (10 success, 10 failure)
+- Run Claude Stage 1 three times on each pitch
+- Measure: score consistency (std dev across runs), mean gap between success/failure groups
+- This becomes the ongoing prompt drift baseline
+
+**Integration test:**
+- For the ~30 recovered pitches, combine structured model score + Claude text score
+- Compare combined AUC against structured-only AUC
+- If adding text analysis doesn't improve AUC, the integration approach needs rethinking (maybe the weighting is wrong, or the prompt needs iteration)
+
+### During Phase 5: Paper Trading Backtests
+
+This is the only test of the complete pipeline (all signals, all gates, all policy constraints).
+
+**Protocol:**
+- Evaluate 30+ live deals across UK and US platforms using Quick + Deep Score
+- Log all recommendations — do not act on them
+- At 18 months: check progress model predictions against actual milestones
+- At 36 months (or earlier if outcome is known): check survival model predictions
+
+**Go-live gate (predefined, not negotiable):**
+- "Invest" deals have higher 18-month progress rate than all 3 baselines
+- "Pass" deals have higher failure rate than "Invest" deals
+- No systematic bias toward a single sector or platform
+- Abstention rate is 10-40%
+
+If the model fails the go-live gate, it stays in shadow mode and parameters are tuned. The gate is not moved to accommodate the model.
 
 ---
 
@@ -1142,10 +1372,25 @@ funding_rounds (
   id uuid PRIMARY KEY,
   company_id uuid REFERENCES companies,
   round_date date,
-  round_type text,
+  round_type text,                  -- seed_equity, safe, convertible_note, series_a, etc.
+  instrument_type text,             -- equity, safe, convertible_note, asa
   amount_raised numeric,
   pre_money_valuation numeric,
   post_money_valuation numeric,
+  -- SAFE/convertible-specific terms
+  valuation_cap numeric,            -- null for uncapped SAFEs (flag as high risk)
+  discount_rate numeric,            -- e.g., 0.20 for 20% discount
+  mfn_clause boolean,               -- most favoured nation
+  interest_rate numeric,            -- convertible notes only
+  maturity_date date,               -- convertible notes only
+  -- Liquidation preference
+  liquidation_preference_multiple numeric DEFAULT 1.0,  -- 1x, 2x, etc.
+  liquidation_participation text,   -- non_participating, participating, capped_participating
+  seniority_position integer,       -- 1 = most senior, higher = more junior
+  -- Pro-rata rights
+  pro_rata_rights boolean,
+  pro_rata_amount numeric,
+  -- Standard fields
   lead_investor text,
   qualified_institutional boolean,
   platform text,
@@ -1153,6 +1398,7 @@ funding_rounds (
   investor_count integer,
   funding_velocity_days integer,
   eis_seis_eligible boolean,
+  qsbs_eligible boolean,            -- US Section 1202 qualification
   source text
 )
 
@@ -1427,6 +1673,22 @@ alert_criteria (
 )
 
 -- ============================================================
+-- INVESTOR POLICY
+-- ============================================================
+
+investor_policy (
+  id serial PRIMARY KEY,
+  max_investments_per_year integer DEFAULT 2,
+  check_size numeric DEFAULT 10000,
+  check_currency text DEFAULT 'GBP',
+  max_per_sector_per_year integer DEFAULT 1,
+  no_forced_deployment boolean DEFAULT true,
+  compliance_hard_blocks boolean DEFAULT true,
+  active boolean DEFAULT true,
+  updated_at timestamptz DEFAULT now()
+)
+
+-- ============================================================
 -- MONITORING & GOVERNANCE
 -- ============================================================
 
@@ -1456,11 +1718,44 @@ recommendation_log (
   id uuid PRIMARY KEY,
   evaluation_id uuid REFERENCES evaluations,
   recommendation_class text NOT NULL,
+  policy_override text,             -- null if no override; e.g., "annual_cap_exceeded"
+  policy_override_reason text,
   user_override text,               -- null if no override; otherwise the action taken
   override_reason text,
   eventual_outcome text,            -- filled in later when outcome is known
   outcome_recorded_at timestamptz,
   created_at timestamptz DEFAULT now()
+)
+
+-- ============================================================
+-- BACKTESTING
+-- ============================================================
+
+backtest_holdout (
+  id uuid PRIMARY KEY,
+  entity_id uuid REFERENCES canonical_entities,
+  company_id uuid REFERENCES companies,
+  holdout_window text NOT NULL,     -- e.g., "2023-2025"
+  created_at timestamptz DEFAULT now()
+  -- This table is physically separated from training pipeline access.
+  -- Records are created once before model training and never modified.
+)
+
+backtest_runs (
+  id serial PRIMARY KEY,
+  run_date timestamptz DEFAULT now(),
+  model_family text,
+  model_version_id integer REFERENCES model_versions,
+  data_snapshot_date date,
+  train_window text,
+  test_window text,
+  features_active jsonb,
+  alt_data_signals_included jsonb,  -- which of the 8 reconstructable signals were used
+  metrics jsonb,                    -- {auc, ece, portfolio_moic, failure_rate, ...}
+  baselines jsonb,                  -- {random: {...}, heuristic: {...}, momentum: {...}}
+  pass_fail jsonb,                  -- {metric_name: {value, threshold, passed}}
+  all_passed boolean,
+  notes text
 )
 ```
 
@@ -1816,7 +2111,7 @@ Generated by StartupLens | Model: [family] v[x] | Rubric v[x] | [date]
 ## Out of Scope (v1)
 
 - **Late-stage models** — add UK_LateGrowth and US_LateGrowth families after MVP stability
-- **Tax scenario toggles** — EIS/SEIS/QSBS as explicit what-if scenarios (currently EIS is factored into return distribution; expand to multi-scenario)
+- **Tax scenario toggles** — EIS/SEIS/QSBS as explicit what-if scenarios with side-by-side comparison (currently each is factored into the return distribution; expand to interactive multi-scenario explorer)
 - **Active learning loop** — automated retraining triggered by outcome feedback (currently: manual retrain after 20+ investments with outcomes)
 - **Challenger models** — train alternative model architectures (LightGBM, neural net) and compare against production model for periodic performance competition
 - **Historical comparables matching** — deferred until Model A is validated
@@ -1830,7 +2125,21 @@ Generated by StartupLens | Model: [family] v[x] | Rubric v[x] | [date]
 
 ---
 
-## What changed: v4 -> v5
+## What changed: v5 -> v6
+
+| Area | v5 | v6 |
+|------|----|----|
+| Backtesting | Paper trading section only | **Full backtesting plan** — Phase 0 infrastructure (walk-forward splitter, test set quarantine, baseline generators, portfolio simulator), predefined pass/fail thresholds, historical alt data reconstruction for 8 signals, entity resolution validation, backtest provenance logging |
+| Terms modelling | Equity raises only | **SAFE/convertible note handling** — valuation cap, discount, MFN, interest rate, maturity. Liquidation preference waterfall modelling (non-participating, participating, capped). Pro-rata exercise. Seniority stack. |
+| Portfolio policy | Dashboard warnings only | **Hard-coded investor constraints** — max 2 investments/year, £10k check size, max 1 per sector/year, no forced deployment. Policy engine enforces at evaluation time, overrides logged. |
+| Abstention consistency | Evidence quality gate routed to "Low Confidence" | **Fixed:** evidence quality gate now routes to **Abstain** like all other gates, consistent with "all gates must pass" rule |
+| US tax treatment | QSBS deferred to future | **Basic QSBS modelling** — Section 1202 qualification check, 5-year hold, $10M/$50M thresholds, flags when eligibility is uncertain. Shown alongside EIS/SEIS in return distribution. |
+| Calibration safety | ECE thresholds without sample gates | **Minimum sample gates** — ECE only actionable with >= 100 test outcomes. Bootstrap CIs for 50-100 range. Kill-switch requires minimum resolved recommendations before triggering. |
+| Data licensing | Not addressed | **Data licensing and retention policy** — per-provider usage rules, 24-hour cache policy, no persistent mirroring of third-party data |
+| Walk-forward validation | Single train/test split | **5-window rolling walk-forward** + regime sensitivity analysis + feature ablation |
+| Alt data backtesting | "Can't be backtested" | **8 of 15 signals are historically reconstructable** (Wayback Machine, GitHub, Companies House, GDELT, npm, Google Trends, FCA, PyPI) — reconstruction pipelines specified |
+
+### Previous changes: v4 -> v5
 
 | Area | v4 | v5 |
 |------|----|----|
