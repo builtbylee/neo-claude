@@ -1,0 +1,6 @@
+company_name,platform,campaign_date,amount_raised,funding_target,equity_offered,pre_money_valuation,investor_count,outcome,sector,country,age_months,had_revenue,founder_count,prior_exits,accelerator,overfunding_ratio
+AlphaTech Ltd,seedrs,2019-03-15,150000,100000,10.5,1428571,234,active,fintech,GB,24,true,2,false,true,1.5
+BetaBrew Co,crowdcube,2020-06-01,50000,75000,15.0,333333,89,dissolved,food_beverage,GB,12,false,1,false,false,0.67
+GammaHealth Inc,republic,2021-01-20,500000,250000,8.0,6250000,567,trading,healthtech,US,36,true,3,true,true,2.0
+DeltaGreen GmbH,companisto,2019-09-10,200000,200000,12.0,1666667,312,failed,cleantech,DE,18,false,2,false,false,1.0
+EpsilonAI Ltd,seedrs,2022-04-05,1200000,500000,5.0,24000000,1023,exited,artificial_intelligence,GB,48,true,4,true,true,2.4

@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""CLI script to run the full walk-forward backtest pipeline."""
+
+from __future__ import annotations
+
+from datetime import date
+
+import typer
+import structlog
+
+from startuplens.backtest.baselines import (
+    ScoredDeal,
+    heuristic_baseline,
+    random_baseline,
+    sector_momentum_baseline,
+)
+from startuplens.backtest.metrics import all_must_pass_met, evaluate_backtest
+from startuplens.backtest.provenance import log_backtest_run
+from startuplens.backtest.simulator import InvestorPolicy, simulate_portfolio
+from startuplens.backtest.splitter import generate_walk_forward_windows, split_entities_by_window
+from startuplens.config import get_settings
+from startuplens.db import get_connection, execute_query
+
+logger = structlog.get_logger(__name__)
+app = typer.Typer()
+
+
+def _load_deals_for_window(conn, window) -> list[ScoredDeal]:
+    """Load deal data for a given time window from the database.
+
+    This is the bridge function connecting the feature store to the backtest
+    pipeline. It queries the training_features_wide materialized view.
+    """
+    rows = execute_query(
+        conn,
+        """
+        SELECT
+            entity_id::text,
+            sector,
+            platform,
+            as_of_date::text AS campaign_date,
+            COALESCE(revenue_at_raise > 0, false) AS has_revenue,
+            COALESCE(qualified_institutional, false) AS has_institutional_coinvestor,
+            COALESCE(eis_seis_eligible, false) AS eis_eligible,
+            'unknown' AS outcome
+        FROM training_features_wide
+        WHERE as_of_date BETWEEN %s AND %s
+        """,
+        (window.test_start.isoformat(), window.test_end.isoformat()),
+    )
+
+    return [
+        ScoredDeal(
+            entity_id=r["entity_id"],
+            score=0.0,
+            sector=r.get("sector") or "unknown",
+            platform=r.get("platform") or "unknown",
+            campaign_date=r["campaign_date"],
+            has_revenue=bool(r.get("has_revenue")),
+            has_institutional_coinvestor=bool(r.get("has_institutional_coinvestor")),
+            eis_eligible=bool(r.get("eis_eligible")),
+            outcome=r.get("outcome", "unknown"),
+        )
+        for r in rows
+    ]
+
+
+@app.command()
+def main(
+    model_family: str = typer.Option("UK_Seed", help="Model family to evaluate"),
+    max_per_year: int = typer.Option(2, help="Max investments per year"),
+    check_size: float = typer.Option(10_000.0, help="Check size per investment"),
+    max_per_sector: int = typer.Option(1, help="Max investments per sector per year"),
+) -> None:
+    """Run walk-forward backtest with baselines and metrics."""
+    settings = get_settings()
+    conn = get_connection(settings)
+    policy = InvestorPolicy(
+        max_investments_per_year=max_per_year,
+        check_size=check_size,
+        max_per_sector_per_year=max_per_sector,
+    )
+
+    try:
+        windows = generate_walk_forward_windows()
+        all_deals: list[ScoredDeal] = []
+
+        for window in windows:
+            deals = _load_deals_for_window(conn, window)
+            logger.info(
+                "loaded_window",
+                window=window.label,
+                deals=len(deals),
+            )
+            all_deals.extend(deals)
+
+        if not all_deals:
+            logger.warning("no_deals_found")
+            return
+
+        # Run baselines
+        random_scored = random_baseline(all_deals)
+        heuristic_scored = heuristic_baseline(all_deals)
+        momentum_scored = sector_momentum_baseline(all_deals, all_deals)
+
+        # Simulate portfolios
+        random_portfolio = simulate_portfolio(random_scored, policy)
+        heuristic_portfolio = simulate_portfolio(heuristic_scored, policy)
+        momentum_portfolio = simulate_portfolio(momentum_scored, policy)
+
+        # Evaluate metrics (using random baseline as reference)
+        metrics = evaluate_backtest(
+            survival_auc=0.5,  # Placeholder — real model AUC goes here
+            calibration_ece=0.5,
+            portfolio_moic=1.0,
+            random_moic=random_portfolio.moic or 1.0,
+            portfolio_failure_rate=heuristic_portfolio.failure_rate,
+            random_failure_rate=random_portfolio.failure_rate,
+            claude_text_auc=0.5,
+            progress_model_auc=0.5,
+            abstention_rate=heuristic_portfolio.abstention_rate,
+            sector_max_deviation=0.0,
+        )
+
+        all_passed = all_must_pass_met(metrics)
+
+        # Log provenance
+        metrics_dict = {m.name: m.value for m in metrics}
+        pass_fail_dict = {
+            m.name: {"value": m.value, "threshold": m.threshold, "passed": m.passed}
+            for m in metrics
+        }
+        baselines_dict = {
+            "random": {"failure_rate": random_portfolio.failure_rate},
+            "heuristic": {"failure_rate": heuristic_portfolio.failure_rate},
+            "momentum": {"failure_rate": momentum_portfolio.failure_rate},
+        }
+
+        run_id = log_backtest_run(
+            conn,
+            model_family=model_family,
+            data_snapshot_date=date.today(),
+            train_window="2016-2022",
+            test_window="2023-2025",
+            features_active=[],
+            metrics=metrics_dict,
+            baselines=baselines_dict,
+            pass_fail=pass_fail_dict,
+            all_passed=all_passed,
+            notes="CLI backtest run",
+        )
+
+        conn.commit()
+        logger.info(
+            "backtest_complete",
+            run_id=run_id,
+            all_passed=all_passed,
+            metrics={m.name: f"{m.value:.3f}" for m in metrics},
+        )
+
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    app()
