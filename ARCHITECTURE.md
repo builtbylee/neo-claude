@@ -1,15 +1,23 @@
-# StartupLens v3 — Final Architecture Plan
+# StartupLens v4 — Final Architecture Plan
 
 ## What this tool does
 
-StartupLens scores pre-IPO tech startups listed on equity crowdfunding platforms (Crowdcube, Republic, Wefunder, StartEngine, Seedrs/Republic Europe, and others) using:
+StartupLens is an AI-powered **investment decision tool** for equity crowdfunding investors. It evaluates not just whether a startup is good, but whether it's a good **investment at the offered price**.
 
-1. **Model B (primary):** Trained on 8,500+ US Reg CF filings from SEC EDGAR + UK crowdfunding outcomes from Companies House + published academic datasets — predicting which crowdfunding-stage companies survive, fail, or exit
-2. **Model A (refinement):** Derived from 20+ years of US/UK tech S-1 filings — informing directional benchmarks by business model (what gross margin, growth rate, and capital efficiency look like for companies that went on to succeed)
-3. **Claude text analysis (core scoring component):** LLM evaluation of pitch narrative quality, claims plausibility, competitive moat, and team strength — validated by research as the single most predictive feature
-4. **Alternative data enrichment (15+ free signals):** Job postings, Google Trends, app store data, GitHub activity, government grants, FCA permissions, press coverage, and more
+It covers the full investment workflow:
 
-The user enters data from a crowdfunding listing, the tool auto-enriches with alternative data, applies a confidence-adjusted quantitative score from a sceptical baseline, and generates an AI-powered due diligence narrative.
+1. **Sourcing** — monitors platforms and SEC filings for new deals matching your criteria
+2. **Screening** — Quick Score mode (5 fields, 2 minutes) to filter the pipeline
+3. **Deep evaluation** — full scoring with 15+ alternative data signals, AI text analysis, competitive landscape generation, valuation analysis, return modelling, and a structured pre-mortem
+4. **Decision support** — exportable investment memo format for sharing with co-investors or advisors
+5. **Portfolio management** — tracks investments, anti-portfolio (passes), follow-on decisions, and outcome feedback to calibrate the rubric over time
+
+### How it works
+
+- **Model B (primary):** Trained on 8,500+ US Reg CF filings from SEC EDGAR + UK crowdfunding outcomes from Companies House + published academic datasets — predicting which crowdfunding-stage companies survive, fail, or exit
+- **Model A (refinement):** Derived from 20+ years of US/UK tech S-1 filings — informing directional benchmarks by business model
+- **Claude text analysis (core scoring component):** LLM evaluation of pitch narrative, competitive landscape, founder depth, and pre-mortem analysis — validated by research as the single most predictive feature
+- **Alternative data enrichment (15+ free signals):** Job postings, Google Trends, app store data, GitHub activity, government grants, FCA permissions, press coverage, and more
 
 ---
 
@@ -17,6 +25,20 @@ The user enters data from a crowdfunding listing, the tool auto-enriches with al
 
 ```
 +-------------------------------------------------------------------------+
+|                       DEAL SOURCING (Phase 5)                           |
+|                                                                         |
+|  +-------------------+  +--------------------+  +--------------------+  |
+|  | SEC EDGAR Form C  |  | Platform RSS /     |  | Alerts             |  |
+|  | new filing monitor|  | new listing monitor|  | (email / Telegram) |  |
+|  | (daily cron)      |  | (Crowdcube, etc.)  |  |                    |  |
+|  +---------+---------+  +---------+----------+  +---------+----------+  |
+|            +------------------------+------------------------+          |
+|                                     v                                   |
+|                          Quick-filter by sector,                        |
+|                          stage, EIS, team signals                       |
++-----------------------------------+------------------------------------|
+                                    |
++-----------------------------------v-------------------------------------+
 |                          DATA PIPELINES (Python)                        |
 |                                                                         |
 |  +--------------+  +---------------+  +-------------+  +--------------+ |
@@ -62,28 +84,30 @@ The user enters data from a crowdfunding listing, the tool auto-enriches with al
 |                 WEB APP (Next.js on Vercel)                             |
 |                                                                         |
 |  +-------------------+  +---------------------+  +-------------------+ |
-|  |  Startup Input    |  |  API Routes         |  |  Results          | |
-|  |  Form             |  |                     |  |  Dashboard        | |
-|  |                   |  |  +----------------+ |  |                   | |
-|  |  Manual fields    +->|  | Alt Data       | +->|  Score +/- range  | |
-|  |  + pitch text     |  |  | Enrichment     | |  |  Category scores  | |
-|  |  paste            |  |  | (15+ APIs)     | |  |  Confidence level | |
-|  |                   |  |  +-------+--------+ |  |  Risk flags       | |
-|  +-------------------+  |         |           |  |  AI narrative     | |
-|                         |  +------v---------+ |  |  Alt data signals | |
-|  +-------------------+  |  | Rubric         | |  |  Missing data     | |
-|  |  Portfolio        |  |  | Scoring        | |  |                   | |
-|  |  Tracker          |  |  | (XGBoost)      | |  +-------------------+ |
-|  |                   |  |  +------+---------+ |                        |
-|  |  Investments      |  |         |           |                        |
-|  |  Outcomes         |  |  +------v---------+ |                        |
-|  |  Rubric accuracy  |  |  | Claude API     | |                        |
-|  |                   |  |  |                 | |                        |
-|  +-------------------+  |  | Text scoring   | |                        |
-|                         |  | + qualitative  | |                        |
-|                         |  | narrative      | |                        |
-|                         |  +----------------+ |                        |
-|                         +---------------------+                        |
+|  |  Two-Tier Input   |  |  API Routes         |  |  Results          | |
+|  |                   |  |                     |  |                   | |
+|  |  Quick Score      |  |  +----------------+ |  |  Quick: pass/fail | |
+|  |  (5 fields,       |  |  | Alt Data       | |  |  Deep: full       | |
+|  |   2 min screen)   |  |  | Enrichment     | |  |  dashboard +      | |
+|  |                   |  |  | (15+ APIs)     | |  |  valuation +      | |
+|  |  Deep Score       +->|  +-------+--------+ +->|  return model +   | |
+|  |  (full form,      |  |         |           |  |  pre-mortem +     | |
+|  |   15-20 min)      |  |  +------v---------+ |  |  competitive      | |
+|  |                   |  |  | Rubric         | |  |  landscape +      | |
+|  +-------------------+  |  | Scoring        | |  |  IC memo export   | |
+|                         |  | (XGBoost)      | |  |                   | |
+|  +-------------------+  |  +------+---------+ |  +-------------------+ |
+|  |  Portfolio &      |  |         |           |                        |
+|  |  Anti-Portfolio   |  |  +------v---------+ |                        |
+|  |                   |  |  | Claude API     | |                        |
+|  |  Investments      |  |  | (3 stages)     | |                        |
+|  |  Passes (tracked) |  |  |                 | |                        |
+|  |  Follow-on eval   |  |  | 1. Text score  | |                        |
+|  |  Outcomes         |  |  | 2. Due diligence| |                       |
+|  |  Rubric accuracy  |  |  | 3. Pre-mortem  | |                        |
+|  |  Sector/stage     |  |  +----------------+ |                        |
+|  |  concentration    |  |                     |                        |
+|  +-------------------+  +---------------------+                        |
 +------------------------------------------------------------------------+
 
                     ALTERNATIVE DATA APIs (free)
@@ -227,17 +251,36 @@ The XGBoost model produces feature importance weights. These are combined with a
 
 ---
 
-### Phase 2 — Web App + Claude Integration + Alternative Data (~2 weeks)
+### Phase 2 — Web App + Claude Integration + Alternative Data (~2.5 weeks)
 
 Build simultaneously with Phase 1 data collection. The web app should be functional with rubric v1 as soon as Model B training completes.
 
-#### 2a. Claude Text Analysis (Core Scoring Component)
+#### 2a. Two-Tier Evaluation System
+
+**Quick Score (screening mode — 5 fields, 2 minutes)**
+
+For initial pipeline filtering. Most deals get killed here.
+
+Required inputs: company name, website URL, sector, approximate revenue, paste pitch text.
+
+What happens:
+- Claude Stage 1 text analysis runs (see 2b below)
+- Tier 1 alt data APIs fire automatically (Google Trends, GDELT, SimilarWeb)
+- Produces a rough score with wide confidence bands (+/-25 points)
+- Binary recommendation: **Investigate further** or **Pass**
+- If Pass, option to log to anti-portfolio with reason
+
+**Deep Score (full evaluation — full form, 15-20 minutes)**
+
+For deals that pass Quick Score. Full form input, all Claude stages, all alt data, competitive landscape, valuation analysis, return modelling, pre-mortem.
+
+#### 2b. Claude Integration (Three Stages)
 
 Research finding: the way a startup describes itself is the **single most important predictive feature**, above all structured variables (Maarouf & Feuerriegel 2024, SHAP analysis). This is not a "nice to have" narrative layer — it's a core quantitative input.
 
-**Implementation: Two-stage Claude call**
+**Stage 1: Structured Text Scoring (runs in both Quick and Deep)**
 
-**Stage 1: Structured Text Scoring (Claude Sonnet 4.5)**
+Model: Claude Sonnet 4.5
 
 ```
 SYSTEM: You are evaluating the quality and credibility of a startup's
@@ -286,25 +329,31 @@ Return JSON only:
   "founder_domain_signal": <int>,
   "risk_honesty": <int>,
   "business_model_clarity": <int>,
-  "text_quality_score": <int>,  // weighted average
+  "text_quality_score": <int>,
   "red_flags": [<string>, ...],
   "reasoning": "<2-3 sentences>"
 }
 ```
 
-The `text_quality_score` becomes a quantitative input to the rubric with its own weight (see scoring section).
+**Stage 2: Due Diligence Narrative + Competitive Landscape + Founder Depth (Deep Score only)**
 
-**Stage 2: Qualitative Due Diligence Narrative (Claude Sonnet 4.5)**
+Model: Claude Sonnet 4.5
 
 ```
-You are writing a due diligence brief for a personal investor
-evaluating a startup on {platform_name}.
+You are writing a due diligence brief for an investor evaluating
+a startup on {platform_name}.
 
 COMPANY DATA:
 {all structured inputs + alt data signals + text scores from Stage 1}
 
 QUANTITATIVE SCORES:
 {category breakdown}
+
+FOUNDER Q&A TEXT (if provided):
+{pasted Q&A from platform discussion section}
+
+FOUNDER CONTENT (if provided):
+{pasted LinkedIn summary, blog posts, or talk descriptions}
 
 SCORING CONTEXT:
 Equity crowdfunding companies are empirically 8.5x more likely to
@@ -314,79 +363,167 @@ whether this specific company is an exception to that base rate.
 
 Write these sections:
 
-1. MOAT ASSESSMENT (2-3 sentences): What type of competitive
+1. COMPETITIVE LANDSCAPE (3-5 sentences): Based on the company
+   description and sector, identify the most likely competitors.
+   For each, estimate their stage and funding level from public
+   knowledge. Assess whether the startup's claimed differentiation
+   is real, defensible, and durable -- or whether a funded
+   competitor could replicate it. Do not accept the startup's
+   claims at face value.
+
+2. MOAT ASSESSMENT (2-3 sentences): What type of competitive
    advantage exists? (network effects, switching costs, regulatory,
    brand, IP, none). Be specific about WHY it's defensible or not.
 
-2. MARKET TIMING (2-3 sentences): Is the market ready? Too early,
+3. MARKET TIMING (2-3 sentences): Is the market ready? Too early,
    right time, or too late? What external forces support or
    undermine timing?
 
-3. TEAM RISK (2-3 sentences): What concerns you about this team's
-   ability to execute? What's genuinely strong?
+4. TEAM ASSESSMENT (3-5 sentences): Assess the team beyond the
+   basic metrics. If Q&A text is provided, evaluate how founders
+   respond to hard questions -- are they defensive, dismissive,
+   or thoughtful? Do they acknowledge uncertainty or pretend
+   everything is perfect? If founder content is provided, assess
+   the depth of domain thinking. Flag gaps in the team (e.g.,
+   technical founders with no commercial experience, or vice versa).
 
-4. BIGGEST RISK (1-2 sentences): The single most likely failure
+5. BIGGEST RISK (1-2 sentences): The single most likely failure
    mode for this company.
 
-5. BULL CASE (1-2 sentences): The specific scenario where this
+6. BULL CASE (1-2 sentences): The specific scenario where this
    returns 10x+. Be concrete.
 
-6. BASE RATE OVERRIDE: Does this company have characteristics that
-   justify overriding the sceptical base rate? (yes/no + 1 sentence why)
+7. BASE RATE OVERRIDE: Does this company have characteristics that
+   justify overriding the sceptical base rate? (yes/no + 1 sentence)
 
-7. QUALITATIVE MODIFIER: Integer from -15 to +15. How much should
-   the quantitative score be adjusted based on factors the rubric
-   cannot capture?
+8. QUALITATIVE MODIFIER: Integer from -15 to +15.
 
-Be direct. Do not hedge. If information is insufficient, say so
-explicitly rather than giving a middling assessment.
+Be direct. Do not hedge. If information is insufficient, say so.
 ```
 
-**Cost per evaluation:** ~$0.03-0.07 (two Sonnet calls).
+**Stage 3: Structured Pre-Mortem (Deep Score only)**
 
-#### 2b. Alternative Data Enrichment
+Model: Claude Sonnet 4.5
 
-When the user submits a company name + website URL, the API routes automatically fetch signals from free sources. Each signal is displayed alongside the manual input and factored into scoring where applicable.
+```
+COMPANY DATA:
+{all structured inputs + alt data + scores}
 
-**Tier 1 — Auto-fetched for every evaluation:**
+CONTEXT: You are writing a pre-mortem analysis. Assume this company
+has failed 3 years from now.
+
+Write a 150-250 word narrative explaining the most likely sequence
+of events that led to failure. Be specific:
+
+- Which risks materialised and in what order?
+- What decisions did the team make (or fail to make) that
+  accelerated the decline?
+- At what point did the company become unrecoverable?
+- Could this failure mode have been predicted from the data
+  available today?
+
+Do NOT list generic risks. Construct a plausible, specific
+narrative. Connect the company's actual weaknesses (burn rate,
+team gaps, competitive position, market timing) into a causal
+chain.
+
+Then answer:
+- PREVENTABLE? (yes/no): Could strong execution have avoided this?
+- PROBABILITY: (low/medium/high): How likely is this specific
+  failure narrative?
+- EARLY WARNING SIGNS: What should the investor watch for in the
+  first 12 months that would indicate this failure mode is
+  materialising?
+
+Return as JSON:
+{
+  "narrative": "<pre-mortem text>",
+  "preventable": <boolean>,
+  "probability": "<low|medium|high>",
+  "early_warning_signs": [<string>, ...],
+  "failure_mode_category": "<cash_runway|competition|execution|
+    market_timing|regulatory|team_breakdown|product_market_fit>"
+}
+```
+
+**Cost per Deep evaluation:** ~$0.08-0.15 (three Sonnet calls).
+**Cost per Quick evaluation:** ~$0.02-0.04 (one Sonnet call).
+
+#### 2c. Valuation & Return Analysis (Deep Score only)
+
+This is the investment-level analysis layer. A great company at a bad price is a bad investment.
+
+**Entry valuation analysis:**
+- Compare pre-money valuation to revenue multiple benchmarks:
+  - Seed SaaS: 10-30x revenue typical, >50x aggressive
+  - Seed marketplace: 5-15x GMV take-rate revenue
+  - Pre-revenue: valued by comparable raises in sector/stage
+- Score: valuation relative to sector/stage median (0-100, with 50 = median)
+- Flag: "Priced at 40x revenue. Sector median for this stage is 15x. Valuation is aggressive."
+
+**Dilution modelling:**
+- Input: current equity offered %, pre-money valuation
+- Estimate future rounds needed before exit (based on sector/stage norms):
+  - Seed -> Series A -> Series B -> exit = ~60-75% total dilution
+  - Seed -> Series A -> exit = ~40-55% total dilution
+- Calculate investor ownership at exit scenarios
+- Output: "Your 2% ownership at entry becomes ~0.5-0.8% at exit after dilution"
+
+**Return scenario modelling:**
+- Given entry valuation and estimated dilution, model return multiples at various exit valuations:
+  - Bear case: acqui-hire at 1x last round valuation
+  - Base case: acquisition at 3-5x last round valuation
+  - Bull case: exit at 10x+ last round valuation
+- Output table showing investor return multiple for each scenario
+- Factor in EIS/SEIS tax relief impact on effective return
+
+**Exit path assessment:**
+- What are the realistic exit routes? (acquisition, IPO, secondary, buyback)
+- Are there plausible acquirers in the market?
+- How long until a potential exit? (typical: 5-8 years for crowdfunding investments)
+- Is the company on a trajectory that leads to any exit, or is it a lifestyle business?
+
+#### 2d. Alternative Data Enrichment
+
+When the user submits a company name + website URL, the API routes automatically fetch signals from free sources.
+
+**Tier 1 — Auto-fetched for every evaluation (Quick + Deep):**
 
 | Signal | API | Auth | Rate limit | What we extract |
 |--------|-----|------|-----------|----------------|
-| Search interest trend (12mo) | Google Trends (pytrends) | None | ~1,400/session | Relative interest 0-100, direction (rising/falling/flat), % change |
+| Search interest trend (12mo) | Google Trends (pytrends) | None | ~1,400/session | Relative interest 0-100, direction, % change |
 | Website rank + trend | SimilarWeb DigitalRank | Free API key | 100/month | Global rank, rank change direction |
-| Press coverage volume + tone | GDELT Doc 2.0 API | None | Unlimited | Article count (30/90 day), average tone score (-100 to +100) |
-| Job posting count + roles | Adzuna API | Free API key | 1,000/day | Open role count, role categories (eng/sales/ops), seniority |
-| Company status + charges | Companies House API | Free API key | 600/5min | Active/dissolved, outstanding charges, filing timeliness |
+| Press coverage volume + tone | GDELT Doc 2.0 API | None | Unlimited | Article count (30/90 day), avg tone (-100 to +100) |
+| Job posting count + roles | Adzuna API | Free API key | 1,000/day | Open role count, role categories, seniority |
+| Company status + charges | Companies House API | Free API key | 600/5min | Active/dissolved, charges, filing timeliness |
 | Director disqualifications | Companies House API | Free API key | (same) | Binary red flag check on all directors |
 
-**Tier 2 — Auto-fetched when applicable (conditional on sector/product type):**
+**Tier 2 — Auto-fetched when applicable (Deep Score, conditional):**
 
 | Signal | Condition | API | What we extract |
 |--------|-----------|-----|----------------|
-| App store rating + reviews | User indicates mobile app | google-play-scraper / app-store-scraper (npm) | Rating, review count, review growth, sentiment |
-| GitHub stars + commit velocity | User provides GitHub URL | GitHub REST API (5K/hr) | Stars, star velocity, contributor count, commit frequency, issue close rate |
-| npm/PyPI downloads | User indicates dev tool | npmjs.org API / pypistats.org | Weekly download count, growth trend |
-| Trustpilot score | Consumer-facing company | Trustpilot API | TrustScore, review count, response rate |
-| ProductHunt launch | User indicates PH launched | ProductHunt GraphQL API | Upvotes, comments, featured status |
-| FCA permissions | Fintech company | FCA Register API (free) | Permission types, authorisation status, regulatory history |
-| Reddit mentions | Any | PRAW (Reddit API) | Post count (30/90 day), subreddit presence, sentiment |
-| Stack Overflow questions | Dev tool | Stack Exchange API (10K/day) | Question count, growth, accepted answer rate |
+| App store rating + reviews | Mobile app | google-play-scraper / app-store-scraper | Rating, review count, growth, sentiment |
+| GitHub stars + commit velocity | GitHub URL provided | GitHub REST API (5K/hr) | Stars, velocity, contributors, commit frequency |
+| npm/PyPI downloads | Dev tool | npmjs.org / pypistats.org | Weekly download count, growth trend |
+| Trustpilot score | Consumer-facing | Trustpilot API | TrustScore, review count, response rate |
+| ProductHunt launch | PH launched | ProductHunt GraphQL API | Upvotes, comments, featured status |
+| FCA permissions | Fintech | FCA Register API (free) | Permissions, authorisation status, history |
+| Reddit mentions | Any | PRAW (Reddit API) | Post count (30/90 day), subreddit presence |
+| Stack Overflow questions | Dev tool | Stack Exchange API (10K/day) | Question count, growth |
 
 **Tier 3 — Manual enrichment (user checks and enters):**
 
 | Signal | Where to check | Form field |
 |--------|---------------|------------|
 | LinkedIn employee count (current) | LinkedIn company page | Number input |
-| LinkedIn employee count (6mo ago) | LinkedIn company page (or estimate) | Number input |
+| LinkedIn employee count (6mo ago) | LinkedIn company page | Number input |
 | Glassdoor rating | glassdoor.co.uk | Number input (1-5) |
 | Innovate UK grants | UKRI funded projects CSV | Checkbox + amount |
 | Government contracts won | Contracts Finder | Checkbox + count |
 
-**Tier 3 signals improve confidence level but are not required.**
+#### 2e. Scoring Engine
 
-#### 2c. Scoring Engine
-
-**Rubric Structure (7 categories):**
+**Rubric Structure (7 categories — revised weights):**
 
 ```
 OVERALL SCORE (0-100) +/- confidence range
@@ -404,7 +541,7 @@ OVERALL SCORE (0-100) +/- confidence range
 |   +-- Risk honesty (Claude Stage 1)
 |   +-- Business model clarity (Claude Stage 1)
 |
-+-- TRACTION & GROWTH (20%)
++-- TRACTION & GROWTH (18%)
 |   +-- Revenue exists (yes/no -- binary gate)
 |   +-- Revenue growth rate (YoY or MoM)
 |   +-- Customer/user count + growth
@@ -414,7 +551,27 @@ OVERALL SCORE (0-100) +/- confidence range
 |   +-- GitHub star velocity (auto, if applicable)
 |   +-- npm/PyPI download growth (auto, if applicable)
 |
-+-- FINANCIAL HEALTH (15%)
++-- DEAL TERMS & VALUATION (15%)   <-- elevated from 5%
+|   +-- Entry valuation vs sector/stage revenue multiple benchmarks
+|   +-- Dilution-adjusted return potential (see 2c)
+|   +-- Exit path plausibility (acquirer exists? IPO trajectory?)
+|   +-- Equity offered % (>25% is negative)
+|   +-- EIS/SEIS tax relief impact on effective return
+|   +-- Share class protections
+|   +-- Platform nominee structure risk
+|
++-- TEAM (15%)
+|   +-- Founder count (2-3 optimal; solo penalised)
+|   +-- Relevant domain experience (years)
+|   +-- Prior startup exits (boolean -- strong positive)
+|   +-- Accelerator alumni (boolean + tier)
+|   +-- Founder Q&A quality (Claude, if provided)
+|   +-- Founder content depth (Claude, if provided)
+|   +-- LinkedIn headcount trend (manual)
+|   +-- Glassdoor rating (manual, if available)
+|   +-- Active hiring signal (Adzuna job count, auto)
+|
++-- FINANCIAL HEALTH (12%)
 |   +-- Gross margin %
 |   +-- Burn multiple (net burn / net new revenue)
 |   +-- Cash runway (months)
@@ -422,38 +579,21 @@ OVERALL SCORE (0-100) +/- confidence range
 |   +-- Debt-to-asset ratio
 |   +-- Revenue model type (recurring > transactional > project)
 |
-+-- TEAM (15%)
-|   +-- Founder count (2-3 optimal; solo penalised)
-|   +-- Relevant domain experience (years)
-|   +-- Prior startup exits (boolean -- strong positive)
-|   +-- Accelerator alumni (boolean + tier)
-|   +-- LinkedIn headcount trend (manual)
-|   +-- Glassdoor rating (manual, if available)
-|   +-- Active hiring signal (Adzuna job count, auto)
-|
-+-- INVESTMENT SIGNAL (15%)
++-- INVESTMENT SIGNAL (10%)
 |   +-- Qualified institutional co-investor (near-binary -- see below)
 |   +-- Prior VC/angel backing (strong positive)
-|   +-- EIS/SEIS eligibility (positive)
 |   +-- Overfunding ratio (moderate positive)
 |   +-- Funding velocity (moderate positive)
-|   +-- Investor count (NEGATIVE above threshold -- dispersed
-|   |   ownership weakens monitoring)
+|   +-- Investor count (NEGATIVE above threshold)
 |   +-- Round progression (clean step-ups vs bridges)
 |
 +-- MARKET (10%)
-|   +-- TAM plausibility (Claude assessment)
-|   +-- Market timing / tailwinds (Claude assessment)
-|   +-- Competitive density
-|   +-- Press coverage trend (GDELT, auto)
-|   +-- Innovate UK / EU grants received (manual)
-|   +-- Government contracts won (manual)
-|
-+-- DEAL TERMS (5%)
-    +-- Pre-money valuation vs revenue multiple benchmarks
-    +-- Equity offered % (>25% is negative)
-    +-- Share class protections
-    +-- Platform nominee structure risk
+    +-- Competitive landscape quality (Claude Stage 2 -- auto-generated)
+    +-- TAM plausibility (Claude assessment)
+    +-- Market timing / tailwinds (Claude assessment)
+    +-- Press coverage trend (GDELT, auto)
+    +-- Innovate UK / EU grants received (manual)
+    +-- Government contracts won (manual)
 ```
 
 **Special rules:**
@@ -464,7 +604,9 @@ OVERALL SCORE (0-100) +/- confidence range
 
 3. **Sceptical baseline:** The score starts at 35, not 50. Evidence must push it upward. This reflects the empirical 8.5x failure rate of ECF companies vs matched non-ECF firms.
 
-4. **Qualitative modifier:** Claude's Stage 2 assessment produces a modifier of -15 to +15, applied after the quantitative score. This captures factors the rubric cannot (market timing nuance, team chemistry signals, competitive dynamics visible only in narrative).
+4. **Qualitative modifier:** Claude's Stage 2 assessment produces a modifier of -15 to +15, applied after the quantitative score.
+
+5. **Valuation gate:** If the Deal Terms & Valuation category scores below 25/100 (extreme overvaluation), flag the evaluation with: *"Company quality may be acceptable but the entry price makes this a poor investment at current terms. Consider negotiating or waiting for a down round."*
 
 **Confidence calculation:**
 
@@ -476,6 +618,19 @@ OVERALL SCORE (0-100) +/- confidence range
 | <50% of fields | Low | +/-25 points |
 
 Additionally, if the company's feature profile is a statistical outlier (far from any training data cluster), confidence is downgraded one level regardless of completeness, with an explicit note: *"This company's profile is unusual -- few historical comparables exist in the training data."*
+
+#### 2f. Additional Input Fields (Deep Score Form)
+
+Beyond the standard form sections (Company, Financials, Deal Terms, Investment Signals, Traction, Team, Market, Pitch Text), the Deep Score form adds:
+
+**Founder Depth (optional, improves Team score accuracy):**
+- Founder Q&A text — paste the investor Q&A discussion from the listing page. Claude analyses how founders respond to hard questions.
+- Founder content — paste LinkedIn summary, blog posts, or conference talk descriptions. Claude assesses depth of domain thinking and intellectual honesty.
+- Founder career trajectory — free text description of career path (e.g., "8 years at Deloitte, rose from analyst to team lead managing FCA submissions for tier-1 banks")
+
+**Competitive Intelligence (optional, improves Market score):**
+- Known competitors — free text list of competitors you've identified
+- Note: even without this input, Claude Stage 2 auto-generates a competitive landscape from the pitch text and sector
 
 ---
 
@@ -491,17 +646,17 @@ Runs after Model B is functional. Refines rubric weights with hard data on what 
 - For each filing:
   - Download HTML document
   - Extract financial tables using Claude Haiku 4.5 (~$0.01/filing, ~$40 total)
-  - Extract from same filing: funding history (capitalization section), founding date (from company history), employee count
+  - Extract from same filing: funding history (capitalization section), founding date, employee count
   - Spot-check 50 filings manually. If accuracy >95%, proceed.
 - Extracted metrics per company: revenue (2-3 years), revenue growth YoY, gross margin, operating expenses, net income/loss, cash position, total funding raised, employee count, time from founding to IPO
 - Libraries: `edgartools`, `sec-parser`, `beautifulsoup4`, `pandas`
 
 #### 3b. UK IPO Pipeline
 
-- Cross-reference Companies House tech SIC codes with LSE/AIM listing records to identify UK tech companies that IPO'd
+- Cross-reference Companies House tech SIC codes with LSE/AIM listing records
 - Fetch pre-IPO iXBRL filings where available (large companies only -- `ixbrlparse`)
 - For small companies with balance-sheet-only filings: track equity and asset changes as growth proxies
-- Download ~100 most relevant AIM Admission Documents (PDF) -> extract financials with Claude Sonnet 4.5 (~$10)
+- Download ~100 most relevant AIM Admission Documents (PDF) -> extract with Claude Sonnet 4.5 (~$10)
 - Accept smaller, noisier UK dataset vs US
 
 #### 3c. Stock Price Data (Post-IPO Performance)
@@ -521,35 +676,85 @@ Runs after Model B is functional. Refines rubric weights with hard data on what 
 - Spearman rank correlation: each pre-IPO metric vs benchmark-relative 3yr alpha
 - Random forest feature importance for non-linear relationships
 - Control for macro regime -- run analysis within each regime separately
-- Output: **business-model-specific benchmarks:**
-  - "SaaS companies with gross margin below 60% at IPO underperformed peers by X% over 3 years"
-  - "Marketplace companies with revenue growth below 40% YoY at IPO underperformed by Y%"
-  - "Hardware companies with burn multiple above 3x at IPO had Z% higher failure rate"
+- Output: **business-model-specific benchmarks** that feed into valuation and scoring thresholds
 
 #### 3e. Rubric Refinement -> v2
 
-- Model A findings refine the **scoring thresholds** within each category (what "good" looks like for SaaS vs marketplace vs consumer vs hardware)
+- Model A findings refine the **scoring thresholds** within each category
 - Category weights stay anchored to Model B (crowdfunding-relevant)
+- Valuation benchmarks by sector/stage feed into the Deal Terms & Valuation category
 - Log: "Rubric v2, generated [date], Model B: [n] crowdfunding outcomes, Model A: [n] S-1 companies, validation AUC: [x], business-model benchmarks for [n] sectors"
 
 ---
 
-### Phase 4 — Portfolio Tracker + Feedback Loop (~3-4 days)
+### Phase 4 — Portfolio Tracker, Anti-Portfolio & Feedback Loop (~1 week)
 
-#### Investment Tracker
+#### 4a. Investment Tracker
 - When you invest based on an evaluation, log: company, date, amount, evaluation score, rubric version
 - Link to the saved evaluation for reference
 
-#### Outcome Monitoring
-- Quarterly check: is the company still trading? Companies House status for UK, SEC EDGAR for US.
-- Track: follow-on raises, revenue updates (from platform updates or Companies House filings), team changes
-- Record: current status (active / raised again / revenue growing / stagnant / written off / exited), outcome multiple (when known)
+#### 4b. Anti-Portfolio Tracker
+- When you pass on a deal, log: company, date, Quick/Deep score, reason for passing
+- Quarterly check: what happened to companies you passed on?
+  - Did they raise a follow-on round? At what valuation?
+  - Are they still trading? Growing? Failed?
+- Over 50+ tracked passes, build a statistical picture of your pass error rate:
+  - False negatives (passed on winners): which signals did the rubric miss?
+  - True negatives (correctly avoided losers): which signals were right?
+- This is more valuable than tracking investments alone, because most decisions are "no"
 
-#### Feedback Loop
+#### 4c. Follow-On Decision Framework
+- When a portfolio company does a follow-on round, support a re-evaluation:
+  - What has changed since the initial evaluation?
+  - Has the company hit the milestones the bull case depended on?
+  - Is the new valuation justified by progress, or is it inflation?
+  - Given what you now know, would you invest at this price if it were a new deal?
+- Lighter version of the full evaluation — many inputs carry over from the original
+- Produces a follow-on recommendation: Increase / Maintain / Do not follow on
+
+#### 4d. Outcome Monitoring
+- Quarterly check: is the company still trading? Companies House status for UK, SEC EDGAR for US.
+- Track: follow-on raises, revenue updates, team changes
+- Record: current status, outcome multiple (when known)
+
+#### 4e. Portfolio-Level View
+Dashboard showing:
+- **Sector concentration:** bar chart of investments by sector with warning if >40% in one sector
+- **Stage diversification:** breakdown by stage at entry
+- **Vintage distribution:** investments by quarter/year with macro regime overlay
+- **Score distribution:** histogram of scores at entry — are you investing in high-conviction deals or spreading across mediocre ones?
+- **Performance tracking:** invested capital, current estimated value, MOIC, IRR (when exits occur)
+- **Rubric accuracy:** average score of successful vs failed investments — is the rubric discriminating?
+
+#### 4f. Feedback Loop
 - After 20+ tracked investments with known outcomes, compare predicted scores against actual results
-- Identify systematic biases: is the rubric consistently wrong on a specific factor?
+- Identify systematic biases
 - Manual rubric adjustment based on personal data
-- Automated alert: if the average score of failed investments overlaps with the average score of successful ones, the rubric has lost discriminatory power and needs retraining
+- Automated alert: if the average score of failed investments overlaps with the average score of successful ones, the rubric has lost discriminatory power
+
+---
+
+### Phase 5 — Deal Sourcing & Monitoring (~1 week)
+
+Proactive deal discovery rather than passive evaluation.
+
+#### 5a. SEC EDGAR Form C Monitor
+- GitHub Actions cron job (daily)
+- Check for new Form C filings via EDGAR EFTS search API
+- Filter by sector keywords matching your target verticals
+- For each new filing: extract issuer name, sector, offering amount, revenue, employee count
+- If it matches your criteria (sector, stage, minimum revenue): send alert
+
+#### 5b. Platform New Listing Monitor
+- Check public listing pages / RSS feeds on Crowdcube, Republic, Wefunder, StartEngine
+- Not full scraping — just detect new listing titles, sectors, and raise targets from public-facing pages
+- If a new listing matches your sector/stage criteria: send alert with link
+- Respect platform ToS — monitor only publicly visible metadata
+
+#### 5c. Alert Delivery
+- Email digest (daily or weekly) of new deals matching criteria
+- Optional Telegram bot for real-time alerts
+- Each alert includes: company name, platform, sector, raise target, and a link to evaluate in StartupLens
 
 ---
 
@@ -564,17 +769,15 @@ companies (
   id uuid PRIMARY KEY,
   name text NOT NULL,
   ticker text,
-  country text NOT NULL,                  -- US, GB, DE, FR, etc.
+  country text NOT NULL,
   sector text,
   sic_code text,
   founding_date date,
   ipo_date date,
-  ipo_exchange text,                      -- NYSE, NASDAQ, AIM, LSE Main
-  source text NOT NULL,                   -- edgar_s1, edgar_form_c, companies_house,
-                                          --   crowdfunding_dataset, manual
-  source_id text,                         -- CIK, company number, or dataset row
-  current_status text,                    -- active, dissolved, acquired, ipo'd,
-                                          --   liquidation, administration
+  ipo_exchange text,
+  source text NOT NULL,
+  source_id text,
+  current_status text,
   status_verified_date date,
   created_at timestamptz DEFAULT now()
 )
@@ -583,7 +786,7 @@ financial_data (
   id uuid PRIMARY KEY,
   company_id uuid REFERENCES companies,
   period_end_date date NOT NULL,
-  period_type text,                       -- annual, quarterly
+  period_type text,
   revenue numeric,
   revenue_growth_yoy numeric,
   gross_profit numeric,
@@ -597,21 +800,20 @@ financial_data (
   employee_count integer,
   burn_rate_monthly numeric,
   customers integer,
-  source_filing text                      -- S-1, 10-K, form_c, iXBRL,
-                                          --   admission_doc, manual
+  source_filing text
 )
 
 funding_rounds (
   id uuid PRIMARY KEY,
   company_id uuid REFERENCES companies,
   round_date date,
-  round_type text,                        -- seed, series_a, crowdfunding, grant, etc.
+  round_type text,
   amount_raised numeric,
   pre_money_valuation numeric,
   post_money_valuation numeric,
   lead_investor text,
-  qualified_institutional boolean,        -- institutional co-investor present?
-  platform text,                          -- crowdcube, seedrs, republic, wefunder, etc.
+  qualified_institutional boolean,
+  platform text,
   overfunding_ratio numeric,
   investor_count integer,
   funding_velocity_days integer,
@@ -631,7 +833,7 @@ ipo_outcomes (
   company_id uuid PRIMARY KEY REFERENCES companies,
   ipo_price numeric,
   ipo_market_cap numeric,
-  macro_regime text,                      -- bull, neutral, bear
+  macro_regime text,
   alpha_1yr numeric,
   alpha_3yr numeric,
   alpha_5yr numeric,
@@ -639,7 +841,7 @@ ipo_outcomes (
   return_3yr numeric,
   return_5yr numeric,
   max_drawdown_3yr numeric,
-  success_tier smallint                   -- 1-5
+  success_tier smallint
 )
 
 crowdfunding_outcomes (
@@ -668,12 +870,11 @@ crowdfunding_outcomes (
   company_age_at_raise_months integer,
   sector text,
   country text,
-  -- Outcome
-  outcome text NOT NULL,                  -- trading, exited, failed, acquired
-  outcome_detail text,                    -- dissolved, liquidation, ipo, m&a, etc.
+  outcome text NOT NULL,
+  outcome_detail text,
   outcome_date date,
   years_to_outcome numeric,
-  data_source text                        -- form_c, companies_house, academic, manual
+  data_source text
 )
 
 -- ============================================================
@@ -682,49 +883,63 @@ crowdfunding_outcomes (
 
 rubric_versions (
   id serial PRIMARY KEY,
-  version text NOT NULL,                  -- v1, v2, etc.
+  version text NOT NULL,
   generated_at timestamptz NOT NULL,
-  model_b_summary text,                   -- "4,200 Form C + 1,800 UK outcomes"
-  model_a_summary text,                   -- "3,100 S-1 companies" (null for v1)
-  validation_method text,                 -- "time-based 2016-2020 / 2021-2022"
+  model_b_summary text,
+  model_a_summary text,
+  validation_method text,
   validation_auc numeric,
-  feature_importance jsonb,               -- SHAP values per feature
-  category_weights jsonb,                 -- { text: 0.20, traction: 0.20, ... }
-  scoring_thresholds jsonb,               -- business-model-specific thresholds
-  academic_overrides jsonb,               -- documented overrides from research
+  feature_importance jsonb,
+  category_weights jsonb,
+  scoring_thresholds jsonb,
+  academic_overrides jsonb,
   notes text
 )
 
 evaluations (
   id uuid PRIMARY KEY,
   rubric_version_id integer REFERENCES rubric_versions,
+  evaluation_type text NOT NULL,          -- quick, deep, follow_on
   company_name text NOT NULL,
   platform text,
   listing_url text,
   -- Input data
-  manual_inputs jsonb NOT NULL,           -- everything from the form
-  pitch_text text,                        -- pasted pitch description
-  alt_data jsonb,                         -- auto-fetched signals
+  manual_inputs jsonb NOT NULL,
+  pitch_text text,
+  founder_qa_text text,                   -- pasted Q&A from platform
+  founder_content_text text,              -- pasted LinkedIn/blog/talks
+  alt_data jsonb,
   alt_data_fetched_at timestamptz,
-  -- Claude analysis
-  text_scores jsonb,                      -- Stage 1 structured scores
-  qualitative_narrative text,             -- Stage 2 narrative
-  qualitative_modifier integer,           -- -15 to +15
+  -- Claude analysis (Stage 1)
+  text_scores jsonb,
+  -- Claude analysis (Stage 2 -- deep only)
+  competitive_landscape text,
+  qualitative_narrative text,
+  qualitative_modifier integer,
+  -- Claude analysis (Stage 3 -- deep only)
+  pre_mortem jsonb,                       -- {narrative, preventable, probability,
+                                          --  early_warning_signs, failure_mode}
+  -- Valuation analysis (deep only)
+  valuation_analysis jsonb,               -- {entry_multiple, sector_median,
+                                          --  dilution_model, return_scenarios,
+                                          --  exit_path_assessment}
   -- Scoring
   quantitative_score numeric NOT NULL,
   confidence_lower numeric NOT NULL,
   confidence_upper numeric NOT NULL,
-  confidence_level text NOT NULL,         -- high, moderate, moderate_low, low
-  category_scores jsonb NOT NULL,         -- per-category breakdown
+  confidence_level text NOT NULL,
+  category_scores jsonb NOT NULL,
   risk_flags jsonb,
-  missing_data_fields jsonb,              -- what would improve confidence
+  missing_data_fields jsonb,
+  -- Quick Score recommendation
+  quick_recommendation text,              -- investigate_further, pass (quick only)
   -- Metadata
   created_at timestamptz DEFAULT now(),
   notes text
 )
 
 -- ============================================================
--- PORTFOLIO TRACKER
+-- PORTFOLIO & ANTI-PORTFOLIO
 -- ============================================================
 
 investments (
@@ -737,49 +952,342 @@ investments (
   evaluation_score numeric,
   rubric_version_id integer REFERENCES rubric_versions,
   -- Outcome tracking
-  current_status text DEFAULT 'active',   -- active, raised_again, growing,
-                                          --   stagnant, written_off, exited
+  current_status text DEFAULT 'active',
   last_status_check date,
   outcome_date date,
-  outcome_multiple numeric,               -- e.g., 3.2x (null until known)
-  follow_on_raises jsonb,                 -- [{date, amount, source}, ...]
+  outcome_multiple numeric,
+  follow_on_raises jsonb,
   outcome_notes text,
   created_at timestamptz DEFAULT now()
+)
+
+anti_portfolio (
+  id uuid PRIMARY KEY,
+  evaluation_id uuid REFERENCES evaluations,
+  company_name text NOT NULL,
+  platform text,
+  passed_date date NOT NULL,
+  evaluation_score numeric,
+  evaluation_type text,                   -- quick, deep
+  pass_reason text NOT NULL,              -- low_score, overvalued, weak_team,
+                                          --   competitive_risk, timing, other
+  pass_notes text,                        -- free text explanation
+  rubric_version_id integer REFERENCES rubric_versions,
+  -- Outcome tracking (what happened after you passed)
+  current_status text,                    -- unknown, trading, failed, raised_again,
+                                          --   exited, acquired
+  last_status_check date,
+  subsequent_raise_amount numeric,
+  subsequent_raise_valuation numeric,
+  outcome_notes text,
+  created_at timestamptz DEFAULT now()
+)
+
+follow_on_evaluations (
+  id uuid PRIMARY KEY,
+  original_investment_id uuid REFERENCES investments,
+  evaluation_id uuid REFERENCES evaluations,  -- links to new deep evaluation
+  follow_on_round_date date,
+  new_valuation numeric,
+  new_round_amount numeric,
+  milestones_hit jsonb,                   -- [{milestone, met: boolean}, ...]
+  recommendation text,                    -- increase, maintain, do_not_follow
+  recommendation_reasoning text,
+  created_at timestamptz DEFAULT now()
+)
+
+-- ============================================================
+-- DEAL SOURCING
+-- ============================================================
+
+deal_alerts (
+  id uuid PRIMARY KEY,
+  source text NOT NULL,                   -- edgar_form_c, crowdcube, republic, etc.
+  company_name text NOT NULL,
+  sector text,
+  offering_amount numeric,
+  revenue numeric,
+  listing_url text,
+  alert_date timestamptz DEFAULT now(),
+  status text DEFAULT 'new',              -- new, reviewed, evaluated, dismissed
+  evaluation_id uuid REFERENCES evaluations,  -- linked if evaluated
+  notes text
+)
+
+alert_criteria (
+  id serial PRIMARY KEY,
+  sectors jsonb NOT NULL,                 -- ["fintech", "healthtech", "saas"]
+  min_revenue numeric,
+  max_offering_amount numeric,
+  countries jsonb,                        -- ["US", "GB"]
+  eis_required boolean DEFAULT false,
+  active boolean DEFAULT true
 )
 ```
 
 ---
 
-## Input Form
-
-The form is designed around what is actually visible on a Crowdcube / equity crowdfunding listing page. Required fields are marked with `*`. Pitch text is required because research shows it is the single strongest predictor of startup quality.
-
-**Sections:**
-
-1. **Company** — name*, website URL*, platform, listing URL, sector*, country*, founded date*, employees, Companies House number (UK only, enables auto status/charges/director checks)
-2. **Financials** — revenue (last 12mo), revenue (prior year), gross margin %, monthly burn rate, revenue model
-3. **Deal Terms** — total raised to date, current round target, amount raised so far, pre-money valuation, equity offered %, EIS/SEIS eligibility, investor count
-4. **Investment Signals** — prior VC/angel backing*, qualified institutional co-investor, notable investors, accelerator attendance
-5. **Traction** — customers/users, growth rate + period, key traction points, net retention % (SaaS), GitHub URL (if open source), app name (if mobile)
-6. **Team** — number of founders*, domain experience (years), prior exits, LinkedIn headcount (current + 6mo ago), Glassdoor rating
-7. **Market** — TAM claim, direct competitors (count), differentiator, Innovate UK grants, government contracts
-8. **Pitch Text*** — large text area for pasting the full pitch description from the listing
-9. **Your Notes** — optional free text for personal impressions, red/green flags
-
----
-
 ## Results Dashboard
 
-The results page displays:
+### Quick Score Result
 
-1. **Overall score** with confidence range (e.g., "68 +/-14, Moderate confidence") and base rate context explaining that ECF companies are 8.5x more likely to fail
-2. **Category breakdown** — bar chart showing score per category with weights
-3. **Alternative data signals** — auto-fetched results (Google Trends, press coverage, job postings, company status, etc.)
-4. **Pitch text analysis** — Claude Stage 1 scores per dimension with red flags
-5. **Risk flags** — specific concerns identified from data and AI analysis
-6. **AI due diligence brief** — Claude Stage 2 narrative covering moat, timing, team, biggest risk, bull case, and base rate override assessment
-7. **Missing data** — fields that would improve confidence if provided
-8. **Actions** — Save, Add to Portfolio, Export PDF, New Evaluation
+```
++---------------------------------------------------------------+
+|  STARTUPLENS -- QUICK SCORE                                   |
+|  ===========================================                  |
+|  Acme Fintech Ltd  -  Crowdcube  -  28 Feb 2026              |
+|                                                               |
+|  ROUGH SCORE: 62 +/- 25 (Low confidence)                     |
+|                                                               |
+|  Recommendation: INVESTIGATE FURTHER                          |
+|                                                               |
+|  Text quality: 75/100 (above average)                         |
+|  Google Trends: Rising (+35%)                                 |
+|  Press coverage: 12 articles (90d), tone: +4.2                |
+|  Companies House: Active, no flags                            |
+|                                                               |
+|  Key signal: Pitch demonstrates genuine domain expertise      |
+|  in regulatory compliance. Claims are specific and            |
+|  measurable.                                                  |
+|                                                               |
+|  Red flags from text:                                         |
+|  - TAM claim of 12B not sourced                               |
+|  - "No direct competitors" claim is likely false              |
+|                                                               |
+|  [Run Deep Score]  [Pass + Log to Anti-Portfolio]             |
++---------------------------------------------------------------+
+```
+
+### Deep Score Result
+
+```
++---------------------------------------------------------------+
+|  STARTUPLENS -- DEEP SCORE                                    |
+|  ===========================================                  |
+|  Acme Fintech Ltd  -  Crowdcube  -  28 Feb 2026              |
+|  Rubric v1  -  Data completeness: 82%                         |
+|                                                               |
+|  +----------------------------------------------------------+|
+|  |  OVERALL SCORE                                            ||
+|  |                                                           ||
+|  |  BASE RATE: ECF companies are 8.5x more likely to fail.  ||
+|  |  This score identifies whether this company is an         ||
+|  |  exception.                                               ||
+|  |                                                           ||
+|  |       57 ------------ 68 ------------ 79                  ||
+|  |       low           score           high                  ||
+|  |                  +/- 11 points                            ||
+|  |             Confidence: HIGH                              ||
+|  |                                                           ||
+|  |  Qualitative modifier: +3 (market timing)                 ||
+|  |  Final adjusted score: 71                                 ||
+|  +----------------------------------------------------------+|
+|                                                               |
+|  CATEGORY BREAKDOWN                                           |
+|  +----------------------------------------------------------+|
+|  | Text & Narrative     ################....  78  (wt 20%)   ||
+|  | Traction & Growth    ############........  62  (wt 18%)   ||
+|  | Deal Terms & Value   ##########..........  55  (wt 15%)   ||
+|  |   Entry: 40x rev (sector median: 15x) -- AGGRESSIVE      ||
+|  |   EIS relief improves effective return by ~30%            ||
+|  |   Dilution to exit: ~65% (3 rounds estimated)             ||
+|  | Team                 #############.......  67  (wt 15%)   ||
+|  |   Q&A quality: Thoughtful, acknowledges uncertainty       ||
+|  | Financial Health     ##########..........  52  (wt 12%)   ||
+|  | Investment Signal    ################....  80  (wt 10%)   ||
+|  |   Institutional co-investor: YES (+15 bonus)              ||
+|  | Market               ##############......  72  (wt 10%)   ||
+|  +----------------------------------------------------------+|
+|                                                               |
+|  RETURN SCENARIOS (at current entry valuation)                |
+|  +----------------------------------------------------------+|
+|  | Scenario      | Exit Val  | Your Return | With EIS       ||
+|  | Bear (1x)     | 8M        | 0.5x        | 0.8x           ||
+|  | Base (5x)     | 40M       | 1.7x        | 2.5x           ||
+|  | Bull (15x)    | 120M      | 5.2x        | 7.4x           ||
+|  | Moon (50x)    | 400M      | 17.3x       | 24.6x          ||
+|  +----------------------------------------------------------+|
+|                                                               |
+|  COMPETITIVE LANDSCAPE (auto-generated by Claude)             |
+|  +----------------------------------------------------------+|
+|  | Identified 5 competitors:                                 ||
+|  | - RegTech Co (Series B, $25M raised) -- direct overlap    ||
+|  | - CompliAI (Series A, $8M) -- similar market, diff angle  ||
+|  | - BigCo Compliance (incumbent, $2B rev) -- enterprise     ||
+|  | - StartupX (Seed, $1.5M) -- early, same thesis            ||
+|  | - OpenReg (open source) -- free alternative, limited      ||
+|  |                                                           ||
+|  | Assessment: Claimed UX differentiation is plausible but   ||
+|  | not defensible. RegTech Co has 10x the engineering team.   ||
+|  | Regulatory moat (FCA authorisation) is the real barrier.  ||
+|  +----------------------------------------------------------+|
+|                                                               |
+|  ALT DATA SIGNALS (auto-fetched)                              |
+|  +----------------------------------------------------------+|
+|  | Google Trends (12mo):  Rising (+35%)                      ||
+|  | SimilarWeb rank:       #245,000 (up from #310k)           ||
+|  | Press coverage (90d):  12 articles, avg tone: +4.2        ||
+|  | Open jobs (Adzuna):    6 roles (3 eng, 2 sales, 1 ops)   ||
+|  | Trustpilot:            4.2/5 (89 reviews)                 ||
+|  | FCA status:            Authorised (e-money issuer)        ||
+|  | Companies House:       Active, 1 charge (BBB -- good)     ||
+|  | Director checks:       Clean                              ||
+|  +----------------------------------------------------------+|
+|                                                               |
+|  PITCH TEXT ANALYSIS                                          |
+|  +----------------------------------------------------------+|
+|  | Clarity: 82   Claims plausibility: 68   Risk honesty: 60 ||
+|  | Problem: 75   Differentiation: 72       Biz model: 80    ||
+|  | Domain signal: 85                                         ||
+|  | Text quality score: 75 (above average)                    ||
+|  +----------------------------------------------------------+|
+|                                                               |
+|  RISK FLAGS                                                   |
+|  - Burn multiple 3.2x (healthy: <2x)                         |
+|  - No prior founder exits                                     |
+|  - 312 investors -- high dispersion weakens monitoring        |
+|  - Entry valuation aggressive (40x vs 15x sector median)     |
+|  - 14 months runway at current burn                           |
+|                                                               |
+|  AI DUE DILIGENCE BRIEF                                       |
+|  -----------------------------------------------------------  |
+|  [Competitive Landscape section -- see above]                 |
+|                                                               |
+|  Moat: Moderate. FCA authorisation creates 12-18 month        |
+|  regulatory barrier. Switching costs exist but data            |
+|  portability reduces lock-in. No network effects.             |
+|                                                               |
+|  Timing: Strong. Open Banking accelerating, PSD3 increasing   |
+|  compliance burden. Market entering growth phase.             |
+|                                                               |
+|  Team: Domain expertise genuine (8yr Deloitte compliance).    |
+|  Q&A responses show intellectual honesty -- acknowledges      |
+|  competitive risk from RegTech Co rather than dismissing it.  |
+|  Gap: no prior startup experience; fundraising and hiring     |
+|  are learned skills first-time founders struggle with.        |
+|                                                               |
+|  Biggest risk: Burns through runway before 50k MRR.           |
+|                                                               |
+|  Bull case: FCA mandates new compliance reporting for all     |
+|  regulated SMEs, creating forced adoption.                    |
+|                                                               |
+|  Base rate override: Partially. Institutional co-investor     |
+|  (Seedcamp) + FCA authorisation are strong exception signals. |
+|                                                               |
+|  PRE-MORTEM                                                    |
+|  -----------------------------------------------------------  |
+|  "Acme burned through its runway trying to compete on price   |
+|  with RegTech Co, which raised a $25M Series B six months     |
+|  after Acme's crowdfunding round. As first-time founders,     |
+|  the team waited too long to cut burn and pivot to a niche    |
+|  vertical. By month 18, they attempted a bridge round, but    |
+|  the aggressive entry valuation made a flat round impossible  |
+|  to swallow for existing investors. The company dissolved at  |
+|  month 22 with 3 months of runway remaining, unable to close  |
+|  new funding at any price."                                   |
+|                                                               |
+|  Preventable: Yes (earlier niche pivot + burn discipline)     |
+|  Probability: Medium                                          |
+|  Early warning signs:                                         |
+|  - RegTech Co announces new product in Acme's segment         |
+|  - Monthly burn increases rather than decreases post-raise    |
+|  - No follow-on VC interest within 12 months                  |
+|  -----------------------------------------------------------  |
+|                                                               |
+|  MISSING DATA (would improve confidence)                      |
+|  - Net revenue retention % (critical for SaaS)                |
+|  - Customer count (unit economics estimate)                   |
+|  - LinkedIn headcount 6mo ago (growth signal)                 |
+|                                                               |
+|  [Save] [Add to Portfolio] [Log Pass to Anti-Portfolio]       |
+|  [Follow-On Eval] [Export Investment Memo] [New Evaluation]   |
++---------------------------------------------------------------+
+```
+
+### Investment Memo Export
+
+The Export button generates a structured document using Claude to reformat all evaluation data:
+
+```
+INVESTMENT MEMO -- [Company Name]
+Date: [date]
+Analyst: StartupLens v[rubric version]
+Recommendation: [Invest / Pass / Monitor]
+Score: [score +/- range] ([confidence level])
+
+1. COMPANY OVERVIEW
+   [From company inputs + pitch text summary]
+
+2. MARKET OPPORTUNITY
+   [TAM analysis, timing assessment, regulatory context]
+
+3. COMPETITIVE LANDSCAPE
+   [Auto-generated competitive analysis from Claude Stage 2]
+
+4. PRODUCT & TRACTION
+   [Revenue, growth, alt data signals, app/GitHub metrics]
+
+5. TEAM
+   [Founder assessment, Q&A analysis, career trajectory]
+
+6. FINANCIALS & UNIT ECONOMICS
+   [Revenue, margins, burn, runway, capital efficiency]
+
+7. DEAL TERMS & RETURN ANALYSIS
+   [Entry valuation, dilution model, return scenarios, EIS impact]
+
+8. KEY RISKS
+   [Risk flags + pre-mortem early warning signs]
+
+9. PRE-MORTEM: HOW THIS FAILS
+   [Full pre-mortem narrative]
+
+10. BULL CASE: HOW THIS RETURNS 10X
+    [Specific bull case scenario]
+
+11. RECOMMENDATION & CONVICTION LEVEL
+    [Score, confidence, qualitative modifier, final assessment]
+
+---
+Generated by StartupLens | Rubric v[x] | [date]
+```
+
+### Portfolio Dashboard
+
+```
++---------------------------------------------------------------+
+|  PORTFOLIO OVERVIEW                                           |
+|  ===========================================                  |
+|                                                               |
+|  SUMMARY                                                      |
+|  Total invested: 12,500                                       |
+|  Active positions: 7                                          |
+|  Written off: 1                                               |
+|  Exited: 0                                                    |
+|  Anti-portfolio tracked: 23                                   |
+|                                                               |
+|  CONCENTRATION WARNINGS                                       |
+|  ! 57% of capital in fintech (>40% threshold)                 |
+|  ! All investments are seed-stage                             |
+|  ! 5 of 7 investments made in last 6 months                   |
+|                                                               |
+|  RUBRIC ACCURACY                                              |
+|  Avg score of active investments: 68                          |
+|  Score of written-off investment: 42                          |
+|  Anti-portfolio: 3 of 23 passes subsequently raised           |
+|    follow-on (false negative rate: 13%)                       |
+|                                                               |
+|  SECTOR BREAKDOWN          SCORE DISTRIBUTION                 |
+|  Fintech:    4 (57%)       40-50: 1 (written off)             |
+|  Healthtech: 1 (14%)       50-60: 1                           |
+|  SaaS:       1 (14%)       60-70: 3                           |
+|  Consumer:   1 (14%)       70-80: 2                           |
+|                                                               |
+|  FOLLOW-ON DECISIONS PENDING                                  |
+|  - Company B: Series A round announced, 3x valuation step-up  |
+|    [Run Follow-On Evaluation]                                 |
++---------------------------------------------------------------+
+```
 
 ---
 
@@ -792,9 +1300,10 @@ The results page displays:
 | UI | shadcn/ui + Tailwind CSS + Recharts | Bundled | 0 |
 | ML model | XGBoost (Python, exported as JSON) | Loaded in API route or Python microservice | 0 |
 | Data pipeline | Python 3.12 (pandas, httpx, xgboost, shap) | Local / GitHub Actions | 0/mo |
+| Deal sourcing cron | Python script | GitHub Actions (daily) | 0/mo |
 | S-1 extraction | edgartools + Claude Haiku 4.5 | Anthropic API | ~40 one-time |
 | UK filing parsing | ixbrlparse + Claude Sonnet 4.5 | Anthropic API | ~10 one-time |
-| Evaluation AI | Claude Sonnet 4.5 (2 calls/eval) | Anthropic API | ~3-5/mo |
+| Evaluation AI (3 stages) | Claude Sonnet 4.5 | Anthropic API | ~5-8/mo |
 | US stock data | yfinance | Free | 0 |
 | UK stock data | yfinance (.L) + Twelve Data | Free tier | 0 |
 | Alt data: trends | Google Trends (pytrends) | Free | 0 |
@@ -809,22 +1318,44 @@ The results page displays:
 | Alt data: grants | Innovate UK CSV, CORDIS download | Free | 0 |
 | Alt data: contracts | Contracts Finder API | Free | 0 |
 | Alt data: website | Wayback CDX, SimilarWeb DigitalRank | Free | 0 |
-| **Total ongoing** | | | **~3-5/mo** |
+| **Total ongoing** | | | **~5-8/mo** |
 | **One-time data build** | | | **~50** |
 
 ---
 
 ## Out of Scope (v1)
 
-- **Historical comparables matching** — deferred until Model A is validated and the stage gap is addressed with a proper nearest-neighbour approach
+- **Historical comparables matching** — deferred until Model A is validated
 - **Automated platform scraping** — all platforms prohibit it; manual input + SEC EDGAR for structured US data
 - **Paid data sources** (Beauhurst, PitchBook, KingsCrowd Edge) — not justified at personal scale
 - **Pipeline orchestration** (Dagster/Prefect) — scripts kept modular, not needed yet
 - **Multi-user auth** — personal tool; add later if opened to others
 - **Real-time data feeds** — batch pipeline, refreshed quarterly
 - **Automated model retraining** — sample size too small; manual review after 20+ tracked investments
-- **Twitter/X monitoring** — $200/month minimum, not worth it for a personal tool
-- **CCJ checks** — 6-10 GBP/search, do manually for companies you're seriously considering
+- **Twitter/X monitoring** — $200/month minimum, not worth it
+- **CCJ checks** — 6-10 GBP/search, do manually for serious candidates
+
+---
+
+## What changed: v3 -> v4
+
+| Area | v3 | v4 |
+|------|----|----|
+| Evaluation philosophy | Evaluates companies | Evaluates **investments** (company quality + entry price + return potential) |
+| Deal Terms weight | 5% (smallest category) | **15%** — valuation analysis, dilution modelling, return scenarios, exit path |
+| Evaluation modes | Single full form | **Two-tier: Quick Score (2 min screening) + Deep Score (full evaluation)** |
+| Competitive landscape | Manual input ("3 competitors") | **Auto-generated by Claude** from pitch text and sector |
+| Claude stages | 2 (text scoring + narrative) | **3 (text scoring + due diligence with competitive landscape + pre-mortem)** |
+| Pre-mortem | Not present | **Structured failure narrative** with probability, preventability, and early warning signs |
+| Founder assessment | Count, experience, exits | **+ Q&A quality analysis + content depth analysis + career trajectory** |
+| Anti-portfolio | Not present | **Track passes and their outcomes** to calibrate error rate |
+| Follow-on decisions | Not present | **Re-evaluation framework** for portfolio company follow-on rounds |
+| Portfolio view | Not present | **Dashboard with concentration warnings**, sector/stage/vintage breakdown, rubric accuracy |
+| Deal sourcing | Passive (user brings deals) | **Active monitoring** of SEC EDGAR + platform new listings with alerts |
+| Output format | Dashboard only | **+ Investment memo export** in standard IC memo format |
+| Financial Health weight | 15% | **12%** — less critical at seed stage |
+| Traction weight | 20% | **18%** — slight reduction to make room for deal terms |
+| Investment Signal weight | 15% | **10%** — separated from deal terms |
 
 ---
 
@@ -841,6 +1372,7 @@ The results page displays:
 - Cumming, Johan & Reardon (2024) — "Institutional Quality and Success in U.S. Equity Crowdfunding" — ScienceDirect
 - Mazzocchini & Lucarelli (2023) — "Success or Failure in Equity Crowdfunding? A Systematic Literature Review" — Management Research Review
 - Hellmann, Mostipan & Vulkan (2019) — "Be Careful What You Ask For" — NBER Working Paper 26275
+- Buttice & Vismara (2022) — "Predicting Business Failure After Crowdfunding Success" — J. Business Venturing Insights
 
 ### AI/LLM Validation
 - Maarouf & Feuerriegel (2024) — "A Fused Large Language Model for Predicting Startup Success" — European Journal of Operational Research (arXiv:2409.03668)
