@@ -1,4 +1,4 @@
-# StartupLens v6 — Architecture Plan
+# StartupLens v7 — Architecture Plan
 
 ## What this tool does
 
@@ -339,7 +339,7 @@ Each stage-country family trains two models:
 
 **Model 2: Short-Horizon Progress Model**
 - Method: XGBoost (binary classifier)
-- Target: did the company achieve a meaningful milestone within 18-24 months? (follow-on raise at higher valuation, revenue 2x+, key hire, product launch, regulatory approval)
+- Target: did the company achieve a verifiable milestone within 18-24 months? Defined strictly as: (a) follow-on funding round at equal or higher valuation, OR (b) revenue >= 2x revenue at raise date — both verified against filing data (SEC/Companies House) or platform updates. Soft milestones (key hire, product launch, regulatory approval) are excluded — they are not reliably verifiable from public data and introduce label noise.
 - Output: P(progress) — probability of hitting a milestone
 - Value: gives you something actionable to check at 18 months rather than waiting 5+ years for a survival outcome
 
@@ -383,7 +383,8 @@ The XGBoost models produce feature importance weights per family. These are comb
 A model that says "70% chance of survival" should be right ~70% of the time. Calibration ensures probabilities are decision-reliable, not just discriminative.
 
 **Calibration method:**
-- After XGBoost training, apply Platt scaling (logistic calibration) or isotonic regression on the validation set
+- After XGBoost training, apply Platt scaling (logistic calibration) on the validation set as the default method
+- **Method selection rule:** Use Platt scaling unless the reliability diagram shows clear non-monotonic miscalibration AND the calibration set has > 500 samples. Only then switch to isotonic regression (which overfits badly below ~300 samples).
 - Measure calibration using Expected Calibration Error (ECE) on the held-out test set
 - Target ECE < 0.05 (5% average miscalibration)
 
@@ -393,11 +394,17 @@ A model that says "70% chance of survival" should be right ~70% of the time. Cal
 - If ECE exceeds 0.10 for any model family (with >= 100 outcomes), trigger recalibration alert
 - If ECE exceeds 0.15 (with >= 100 outcomes), activate kill-switch (see Phase 7)
 
-**Model release gate:**
+**Model release gate (Phase 2 — structured model only):**
 - A model family cannot go live unless:
   - Test set AUC > 0.60 (minimum discriminative power)
   - Test set ECE < 0.08 (minimum calibration quality)
   - Portfolio simulation under investor constraints beats random-selection baseline
+
+**Combined model release gate (Phase 3 — after Claude integration):**
+- The full pipeline (structured model + Claude text scores) must separately pass:
+  - Combined AUC >= structured-only AUC (text analysis must not degrade discrimination)
+  - Portfolio simulation MOIC with text scores >= portfolio MOIC without (text weight is justified)
+  - If combined AUC < structured-only AUC, reduce text weight from 20% until combined >= structured, or investigate prompt quality
 
 ---
 
@@ -644,9 +651,14 @@ This is the investment-level analysis layer. A great company at a bad price is a
 Instead of fixed bear/base/bull labels, model a return distribution based on the stage-country model's outcome probabilities:
 
 - Use the survival model's P(fail), P(survive), P(exit) to weight exit scenarios
+- **Exit-multiple distributions per outcome class:**
+  - **Failed:** model as a mixture — P(total loss) = 0.85 (dissolved, no recovery), P(partial recovery at 0.05-0.3x) = 0.15 (asset sales, acqui-hires). Fit from training data if >= 30 failure outcomes with known recovery amounts; otherwise use these defaults from KingsCrowd data (160 shutdowns vs 15 asset sales).
+  - **Surviving (trading, no exit):** secondary sale at 0.3-1.2x last round valuation (log-normal, median 0.6x), reflecting illiquidity discount. If no secondary market exists, value at 0x (locked capital).
+  - **Exited (acquisition/IPO):** fit a log-normal distribution from training data exit multiples. If training data has < 30 exits, use published benchmarks — Correlation Ventures power law: ~65% return <1x, ~25% return 1-5x, ~7% return 5-10x, ~3% return >10x. Parameterise as log-normal(mu=0.5, sigma=1.8) adjusted by stage-country family.
 - For each exit scenario, apply dilution model and entry valuation to compute investor MOIC
-- Output: **P10 / P50 / P90 return multiples** (10th, 50th, 90th percentile)
-- Factor in EIS/SEIS tax relief impact on effective return at each percentile
+- Monte Carlo simulation (1,000 draws): sample outcome class from survival model probabilities, then sample exit multiple from the class-specific distribution, apply dilution
+- Output: **P10 / P50 / P90 return multiples** (10th, 50th, 90th percentile) from the simulated distribution
+- Factor in EIS/SEIS/QSBS tax relief impact on effective return at each percentile
 - Compute expected value (probability-weighted mean return)
 
 **Tax relief modelling (UK — EIS/SEIS):**
@@ -696,8 +708,8 @@ Abstention is first-class. A deal cannot receive a positive recommendation unles
 |------|-----------|---------------|
 | Data completeness | >= 40% of fields populated (Quick), >= 60% (Deep) | Route to **Abstain** — "Insufficient data to score" |
 | Entity-match confidence | >= 70 | Route to **Manual Review** — "Entity identity unresolved" |
-| Model confidence | Survival model prediction entropy < 0.9 | Route to **Abstain** — "Model cannot distinguish this company from base rate" |
-| Prediction uncertainty | P90 - P10 return spread < 50x | Route to **Abstain** — "Return range too wide for meaningful recommendation" |
+| Model confidence | Survival model normalised entropy < 0.70 (raw entropy / ln(3); i.e., raw entropy < 0.77) | Route to **Abstain** — "Model cannot distinguish this company from base rate" |
+| Prediction uncertainty | P90 - P10 return spread < 20x | Route to **Abstain** — "Return range too wide for meaningful recommendation" |
 | Calibration health | Current model family ECE < 0.10 | Route to **Abstain** — "Model calibration degraded, recommendations suspended" |
 | Evidence quality | >= 3 independent data sources confirm key claims | Route to **Abstain** — "Key claims unverifiable from available sources" |
 
@@ -891,6 +903,28 @@ Not all "free" APIs permit all uses. Key restrictions to respect:
 - **Companies House / FCA / SEC EDGAR:** public government data, no usage restrictions.
 - **General rule:** cache API responses for max 24 hours per evaluation. Do not build a persistent mirror of any third-party dataset. Store only the extracted signal values (e.g., "Trustpilot 4.2/5, 89 reviews"), not raw API responses.
 
+**API failure and graceful degradation strategy:**
+
+Not all alt data signals are equal. When an API fails, the evaluation must continue — not block.
+
+| Signal | Required for | Failure behaviour |
+|--------|-------------|------------------|
+| Companies House status | Quick + Deep | **Hard requirement** (UK only). If unavailable, route to Abstain — cannot verify company is active. |
+| Google Trends | Quick + Deep | Optional. If unavailable, skip and note in missing_data_fields. No score penalty. |
+| GDELT press coverage | Quick + Deep | Optional. Skip and note. |
+| Adzuna jobs | Quick + Deep | Optional. Skip and note. |
+| SimilarWeb rank | Quick + Deep | Optional. Skip and note. |
+| Director disqualifications | Quick + Deep | **Hard requirement** (UK only). If unavailable, route to Manual Review — cannot clear kill criteria. |
+| App store / GitHub / npm | Deep (conditional) | Optional. Skip and redistribute weight to available traction signals. |
+| Trustpilot / Reddit / PH | Deep (conditional) | Optional. Skip and note. |
+| FCA permissions | Deep (fintech) | **Soft requirement** for fintech. If unavailable, flag: "FCA status unverified" and apply -5 to regulatory score. |
+
+**Failure handling rules:**
+- **Timeout:** 10 seconds per API call. If exceeded, treat as unavailable.
+- **Retry:** one retry with exponential backoff (2s delay) for transient errors (HTTP 429, 500, 503). No retry for 401/403/404.
+- **Circuit breaker:** if an API fails 3 consecutive evaluations, disable it for 24 hours and log an alert. Re-enable automatically after 24 hours.
+- **Scoring adjustment:** when optional signals are missing, redistribute their rubric weight proportionally among available signals in the same category. Do not leave weight unallocated — this would systematically deflate scores when APIs are down.
+
 #### 3h. Additional Input Fields (Deep Score Form)
 
 Beyond the standard form sections (Company, Financials, Deal Terms, Investment Signals, Traction, Team, Market, Pitch Text), the Deep Score form adds:
@@ -973,12 +1007,19 @@ Before using StartupLens for real investment decisions, run in shadow mode:
   - **Baseline 2: Simple heuristic** — "has revenue + institutional co-investor + EIS eligible"
   - **Baseline 3: Sector momentum** — invest in the hottest sector on the platform
 
-**Go-live gate:** Model must demonstrate:
-- Recommended "Invest" deals have higher 18-month progress rate than all three baselines
-- Recommended "Pass" deals have higher failure rate than "Invest" deals (discrimination works)
-- No systematic bias toward a single sector or platform
+**Go-live gate (predefined numeric thresholds — not negotiable):**
 
-If the model fails the go-live gate, it stays in shadow mode while model parameters are tuned.
+| KPI | Threshold | What failure means |
+|-----|-----------|-------------------|
+| Top-decile hit rate | >= 50% of top-scored deals still trading or exited at 18mo | Model's best picks aren't reliably good. Investigate feature engineering. |
+| Downside capture | "Invest" deals have < 0.6x the failure rate of random baseline | Model isn't avoiding losers well enough. Tighten abstention gates. |
+| "Invest" vs baseline progress | "Invest" deals have higher 18-month progress rate than all 3 baselines | Core discrimination isn't working. Full model review required. |
+| "Pass" vs "Invest" failure | "Pass" deals have higher failure rate than "Invest" deals | Model can't distinguish good from bad. Do not deploy. |
+| Sector bias | No single sector > 50% of "Invest" recommendations | Model may be overfit to one sector. Add sector-agnostic features. |
+| Calibration at go-live | ECE < 0.08 on paper trading period outcomes | Probabilities unreliable for decision-making. Recalibrate. |
+| Abstention rate | 10-40% of evaluated deals | Below 10%: gates too loose. Above 40%: tool unusable. |
+
+All thresholds must pass simultaneously. If any fail, the model stays in shadow mode and parameters are tuned. The gate is not moved to accommodate the model.
 
 #### 5b. Investment Tracker
 - When you invest based on an evaluation, log: company, date, amount, evaluation score, model family, rubric version
@@ -1108,6 +1149,12 @@ Every recommendation is logged with:
 
 This log is the foundation for all post-hoc analysis. It enables you to ask: "For every deal where I overrode the model, what happened?"
 
+**Override audit rule:**
+- Every manual override (user changes recommendation class or ignores a policy constraint) must include a written reason at the time of override — the system blocks saving without one
+- Quarterly review: for all overrides with known outcomes, compare override decisions against what the model recommended
+- If overrides perform worse than model recommendations across 5+ resolved overrides, display a permanent banner: "Your overrides have historically underperformed the model. Consider trusting the system."
+- Override audit results are displayed on the portfolio dashboard under "Model Health"
+
 ---
 
 ## Backtesting Plan
@@ -1192,24 +1239,7 @@ For backtesting purposes, use the ~8 reconstructable signals to build as-of feat
 
 **0h. Backtest provenance log**
 
-Every backtest run is logged:
-
-```sql
-backtest_runs (
-  id serial PRIMARY KEY,
-  run_date timestamptz DEFAULT now(),
-  model_family text,
-  model_version_id integer,
-  data_snapshot_date date,
-  train_window text,                -- e.g., "2016-2020"
-  test_window text,                 -- e.g., "2021-2022"
-  features_active jsonb,            -- which feature families were included
-  metrics jsonb,                    -- all computed metrics
-  baselines jsonb,                  -- baseline results for comparison
-  passed boolean,                   -- did it meet all "must pass" thresholds?
-  notes text
-)
-```
+Every backtest run is logged in the `backtest_runs` table (see Database Schema section for full schema, which includes additional fields: `alt_data_signals_included`, `pass_fail` per-metric breakdown, and `all_passed` flag).
 
 ### During Phase 2: Model Training Backtests
 
@@ -1268,11 +1298,7 @@ This is the only test of the complete pipeline (all signals, all gates, all poli
 - At 18 months: check progress model predictions against actual milestones
 - At 36 months (or earlier if outcome is known): check survival model predictions
 
-**Go-live gate (predefined, not negotiable):**
-- "Invest" deals have higher 18-month progress rate than all 3 baselines
-- "Pass" deals have higher failure rate than "Invest" deals
-- No systematic bias toward a single sector or platform
-- Abstention rate is 10-40%
+**Go-live gate:** same numeric KPI thresholds as Phase 5a (top-decile hit rate, downside capture, discrimination, sector bias, calibration, abstention rate). All must pass simultaneously.
 
 If the model fails the go-live gate, it stays in shadow mode and parameters are tuned. The gate is not moved to accommodate the model.
 
@@ -1757,6 +1783,59 @@ backtest_runs (
   all_passed boolean,
   notes text
 )
+
+-- ============================================================
+-- INDEXES
+-- ============================================================
+
+-- Feature store: training queries pivot on entity + date
+CREATE INDEX idx_feature_store_entity_date ON feature_store(entity_id, as_of_date);
+CREATE INDEX idx_feature_store_family ON feature_store(feature_family, feature_name);
+
+-- Evaluations: portfolio views, monitoring queries
+CREATE INDEX idx_evaluations_entity ON evaluations(entity_id, created_at DESC);
+CREATE INDEX idx_evaluations_model ON evaluations(model_family, recommendation_class);
+CREATE INDEX idx_evaluations_type ON evaluations(evaluation_type, created_at DESC);
+
+-- Entity resolution: lookup by source identifier
+CREATE INDEX idx_entity_links_source ON entity_links(source, source_identifier);
+CREATE INDEX idx_entity_links_entity ON entity_links(entity_id);
+
+-- Deal funnel: sourcing analysis
+CREATE INDEX idx_deal_funnel_platform ON deal_funnel(platform, existed_at DESC);
+CREATE INDEX idx_deal_funnel_sector ON deal_funnel(sector, country);
+
+-- Portfolio: outcome tracking
+CREATE INDEX idx_investments_status ON investments(current_status, invested_date DESC);
+CREATE INDEX idx_anti_portfolio_date ON anti_portfolio(passed_date DESC);
+
+-- Monitoring: calibration and recommendation audit
+CREATE INDEX idx_calibration_log_model ON calibration_log(model_version_id, checked_at DESC);
+CREATE INDEX idx_recommendation_log_eval ON recommendation_log(evaluation_id);
+CREATE INDEX idx_recommendation_log_override ON recommendation_log(user_override) WHERE user_override IS NOT NULL;
+
+-- Training data: model training queries
+CREATE INDEX idx_crowdfunding_outcomes_stage ON crowdfunding_outcomes(stage_bucket, country, label_quality_tier);
+CREATE INDEX idx_companies_entity ON companies(entity_id);
+
+-- Backtest: holdout lookup
+CREATE INDEX idx_backtest_holdout_window ON backtest_holdout(holdout_window);
+
+-- Training-ready materialized view (refreshed before each training run)
+-- Pivots the EAV feature_store into a wide feature matrix for XGBoost
+CREATE MATERIALIZED VIEW training_features_wide AS
+SELECT
+  entity_id,
+  as_of_date,
+  MAX(CASE WHEN feature_name = 'revenue_at_raise' THEN (feature_value->>'value')::numeric END) AS revenue_at_raise,
+  MAX(CASE WHEN feature_name = 'employee_count' THEN (feature_value->>'value')::numeric END) AS employee_count,
+  -- ... (one column per feature, generated programmatically from feature registry)
+  MAX(label_quality_tier) AS worst_label_tier
+FROM feature_store
+WHERE label_quality_tier <= 2  -- exclude Tier 3
+GROUP BY entity_id, as_of_date;
+
+CREATE UNIQUE INDEX idx_training_wide_entity ON training_features_wide(entity_id, as_of_date);
 ```
 
 ---
@@ -2080,7 +2159,7 @@ Generated by StartupLens | Model: [family] v[x] | Rubric v[x] | [date]
 | Frontend + API routes | Next.js 15 (App Router, TypeScript) | Vercel free tier | 0/mo |
 | Database | PostgreSQL | Supabase free tier (500MB) | 0/mo |
 | UI | shadcn/ui + Tailwind CSS + Recharts | Bundled | 0 |
-| ML models | XGBoost (Python, exported as JSON per family) | Loaded in API route or Python microservice | 0 |
+| ML models | XGBoost (Python, exported as JSON per family) | Python FastAPI microservice (Railway free tier or Render) called from Next.js API routes | 0 |
 | Entity resolution | Python (`dedupe` library + custom rules) | Runs in data pipeline | 0 |
 | Feature store | PostgreSQL (feature_store table) | Supabase | 0 |
 | Data pipeline | Python 3.12 (pandas, httpx, xgboost, shap) | Local / GitHub Actions | 0/mo |
@@ -2103,8 +2182,16 @@ Generated by StartupLens | Model: [family] v[x] | Rubric v[x] | [date]
 | Alt data: grants | Innovate UK CSV, CORDIS download | Free | 0 |
 | Alt data: contracts | Contracts Finder API | Free | 0 |
 | Alt data: website | Wayback CDX, SimilarWeb DigitalRank | Free | 0 |
+| ML inference service | FastAPI (Python) | Railway free tier or Render free tier | 0/mo |
 | **Total ongoing** | | | **~5-8/mo** |
 | **One-time data build** | | | **~50** |
+
+**Storage estimate (Supabase):**
+- Feature store: ~10,000 entities x 50 features x 5 snapshots = 2.5M rows (~500MB at ~200 bytes/row with JSONB)
+- Evaluations + portfolio: ~5,000 rows (~50MB)
+- Training data + outcomes: ~15,000 rows (~30MB)
+- **Total estimated: ~600MB — exceeds Supabase free tier (500MB)**
+- **Plan:** start on free tier during Phase 1 data collection. Upgrade to Supabase Pro ($25/mo) when feature store exceeds 400MB. Alternatively, archive old feature snapshots (keep only latest 2 per entity) to stay under 500MB longer.
 
 ---
 
@@ -2125,7 +2212,24 @@ Generated by StartupLens | Model: [family] v[x] | Rubric v[x] | [date]
 
 ---
 
-## What changed: v5 -> v6
+## What changed: v6 -> v7
+
+| Area | v6 | v7 |
+|------|----|----|
+| Return modelling | "Weight exit scenarios" (unspecified distributions) | **Explicit exit-multiple distributions** per outcome class — log-normal fits from training data or Correlation Ventures benchmarks, Monte Carlo simulation (1,000 draws), partial recovery modelling for failures |
+| Abstention gates | Entropy < 0.9 (raw), return spread < 50x | **Tightened:** normalised entropy < 0.70 (30% more decisive than uniform), return spread < 20x |
+| Progress model | Vague "meaningful milestone" (6 possible definitions) | **Strict binary:** follow-on raise at >= valuation OR revenue >= 2x, verified against filings only |
+| Model release gates | Single gate for structured + text combined | **Two-stage gates:** Phase 2 gate (structured only), Phase 3 gate (combined must not degrade structured AUC) |
+| Calibration method | "Platt or isotonic" (no selection rule) | **Selection rule:** Platt by default; isotonic only if non-monotonic miscalibration AND > 500 calibration samples |
+| Go-live gate | 3 qualitative criteria | **7 numeric KPI thresholds** — top-decile hit rate, downside capture, discrimination, sector bias, calibration, abstention rate |
+| API reliability | Not addressed | **Full graceful degradation strategy** — required vs optional signals, 10s timeout, circuit breaker (3 failures = 24hr disable), weight redistribution |
+| Override governance | Fields in schema but no rules | **Override audit rule** — mandatory reason, quarterly outcome review, underperformance banner |
+| Database | Tables only, no indexes | **Full index set** — 15 indexes covering feature store, evaluations, entity links, deal funnel, portfolio, monitoring + training-ready materialized view |
+| Storage | "Supabase free tier" | **Storage estimate** (~600MB, exceeds free tier) with upgrade plan |
+| XGBoost inference | "API route or Python microservice" (unresolved) | **Resolved:** Python FastAPI microservice on Railway/Render, called from Next.js API routes |
+| Backtest schema | Duplicate inline schema (0h) vs formal schema | **Deduplicated:** inline schema removed, references formal schema |
+
+### Previous changes: v5 -> v6
 
 | Area | v5 | v6 |
 |------|----|----|
