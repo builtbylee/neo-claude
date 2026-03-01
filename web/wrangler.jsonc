@@ -1,0 +1,13 @@
+{
+  "name": "startuplens",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  // Environment variables set via `wrangler secret put` or Cloudflare dashboard
+  // SUPABASE_URL, SUPABASE_ANON_KEY, ANTHROPIC_API_KEY
+  "vars": {}
+}

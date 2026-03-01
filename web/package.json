@@ -1,0 +1,30 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "build:cf": "npx @opennextjs/cloudflare build",
+    "preview": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@opennextjs/cloudflare": "^1.17.1",
+    "@supabase/supabase-js": "^2.98.0",
+    "next": "^15.5.12",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "wrangler": "^4.69.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^18.3.28",
+    "@types/react-dom": "^18.3.7",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
