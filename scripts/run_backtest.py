@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date
 
 import structlog
@@ -51,7 +52,8 @@ def _load_deals_for_window(conn, window) -> list[ScoredDeal]:
         LEFT JOIN crowdfunding_outcomes co
             ON co.company_id = c.id AND co.label_quality_tier <= 2
         WHERE tfw.as_of_date BETWEEN %s AND %s
-        ORDER BY tfw.entity_id, tfw.as_of_date, el.confidence DESC
+        ORDER BY tfw.entity_id, tfw.as_of_date,
+            el.confidence DESC, co.campaign_date DESC NULLS LAST
         """,
         (window.test_start.isoformat(), window.test_end.isoformat()),
     )
@@ -149,22 +151,26 @@ def main(
         avg_abstention = sum(w["abstention_rate"] for w in window_results) / n
 
         metrics = evaluate_backtest(
-            survival_auc=0.5,  # Placeholder — real model AUC goes here
-            calibration_ece=0.5,
-            portfolio_moic_vs_random=1.0,  # Placeholder — no returns model yet
+            survival_auc=math.nan,  # Phase 4: requires trained model
+            calibration_ece=math.nan,  # Phase 4: requires trained model
+            portfolio_moic_vs_random=math.nan,  # Phase 4: requires returns data
             portfolio_failure_rate_vs_random=avg_fail_vs_random,
-            claude_text_score_auc=0.5,
-            progress_auc=0.5,
+            claude_text_score_auc=math.nan,  # Phase 4: requires Claude scoring
+            progress_auc=math.nan,  # Phase 4: requires trained model
             abstention_rate=avg_abstention,
-            max_sector_share=0.0,
+            max_sector_share=math.nan,  # Phase 4: requires portfolio analysis
         )
 
         all_passed = all_must_pass_met(metrics)
 
         # Log provenance with per-window detail
-        metrics_dict = {m.name: m.value for m in metrics}
+        # Convert NaN → None for JSON serialization (PostgreSQL rejects NaN in JSONB)
+        def _safe(v: float) -> float | None:
+            return None if math.isnan(v) else v
+
+        metrics_dict = {m.name: _safe(m.value) for m in metrics}
         pass_fail_dict = {
-            m.name: {"value": m.value, "threshold": m.threshold, "passed": m.passed}
+            m.name: {"value": _safe(m.value), "threshold": m.threshold, "passed": m.passed}
             for m in metrics
         }
         baselines_dict = {"per_window": window_results}

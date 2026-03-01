@@ -153,11 +153,25 @@ def merge_entities(
     merge_id:
         UUID of the entity to absorb and remove.
     """
-    execute_query(
-        conn,
-        "UPDATE entity_links SET entity_id = %s WHERE entity_id = %s",
-        (keep_id, merge_id),
-    )
+    # Tables with unique constraints on entity_id + other columns:
+    # delete merge_id rows that would conflict, then update the rest.
+    for table in ("feature_store", "backtest_holdout"):
+        execute_query(
+            conn,
+            f"DELETE FROM {table} WHERE entity_id = %s",  # noqa: S608
+            (merge_id,),
+        )
+
+    # Reassign remaining FK references from merge_id → keep_id
+    for table in (
+        "entity_links", "companies", "evaluations",
+        "investments", "anti_portfolio", "deal_funnel",
+    ):
+        execute_query(
+            conn,
+            f"UPDATE {table} SET entity_id = %s WHERE entity_id = %s",  # noqa: S608
+            (keep_id, merge_id),
+        )
     execute_query(
         conn,
         "DELETE FROM canonical_entities WHERE id = %s",

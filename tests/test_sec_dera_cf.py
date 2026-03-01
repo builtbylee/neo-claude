@@ -397,13 +397,18 @@ class TestIngestDeraCfBatch:
 
 
 class TestIsQuarterIngested:
-    @patch("startuplens.db.execute_query", return_value=[{"x": 1}])
+    @patch("startuplens.db.execute_query", return_value=[{"cnt": 100}])
     def test_returns_true_when_ingested(self, mock_eq: MagicMock):
         conn = MagicMock()
         assert _is_quarter_ingested_cf(conn, 2024, 4) is True
 
-    @patch("startuplens.db.execute_query", return_value=[])
+    @patch("startuplens.db.execute_query", return_value=[{"cnt": 0}])
     def test_returns_false_when_not_ingested(self, mock_eq: MagicMock):
+        conn = MagicMock()
+        assert _is_quarter_ingested_cf(conn, 2024, 4) is False
+
+    @patch("startuplens.db.execute_query", return_value=[{"cnt": 3}])
+    def test_returns_false_when_partial_ingest(self, mock_eq: MagicMock):
         conn = MagicMock()
         assert _is_quarter_ingested_cf(conn, 2024, 4) is False
 

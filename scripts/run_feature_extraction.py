@@ -93,13 +93,30 @@ def main(
                 fr.round_type,
                 fr.instrument_type,
                 fr.amount_raised AS fr_amount_raised,
-                fr.platform
+                fr.platform,
+                -- financial_data fields (most recent filing)
+                fd.total_assets,
+                fd.total_debt,
+                fd.cash_and_equivalents AS cash_position,
+                fd.burn_rate_monthly,
+                fd.gross_margin,
+                fd.employee_count,
+                fd.net_income,
+                fd.revenue AS fd_revenue,
+                fd.revenue_growth_yoy AS revenue_growth_rate
             FROM canonical_entities ce
             JOIN entity_links el ON el.entity_id = ce.id
             JOIN companies c
                 ON c.source_id = el.source_identifier AND el.source = c.source
             LEFT JOIN crowdfunding_outcomes co ON co.company_id = c.id
-            LEFT JOIN funding_rounds fr ON fr.company_id = c.id"""
+            LEFT JOIN funding_rounds fr ON fr.company_id = c.id
+            LEFT JOIN LATERAL (
+                SELECT *
+                FROM financial_data fd2
+                WHERE fd2.company_id = c.id
+                ORDER BY fd2.period_end_date DESC
+                LIMIT 1
+            ) fd ON true"""
             + (" WHERE co.id IS NOT NULL" if with_outcomes_only else "")
             + """
             ORDER BY ce.id, el.confidence DESC,

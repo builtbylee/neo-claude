@@ -62,7 +62,8 @@ def write_feature(
         raise ValueError(msg)
 
     feat = get_feature(feature_name)
-    feature_value = json.dumps({"value": value})
+    v = float(value) if isinstance(value, Decimal) else value
+    feature_value = json.dumps({"value": v})
 
     sql = """
         INSERT INTO feature_store

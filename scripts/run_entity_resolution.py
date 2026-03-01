@@ -44,7 +44,7 @@ def main(
         # Build query with optional source filter
         query = """
             SELECT
-                c.id::text AS source_identifier,
+                c.source_id AS source_identifier,
                 c.name,
                 c.country,
                 c.source

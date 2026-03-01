@@ -44,18 +44,22 @@ _DISCLOSURE_FILE = "FORM_C_DISCLOSURE.tsv"
 
 
 class _RateLimiter:
-    """Simple rate limiter for SEC requests."""
+    """Thread-safe rate limiter for SEC requests."""
 
     def __init__(self, min_interval: float = _MIN_REQUEST_INTERVAL) -> None:
+        import threading
+
         self._min_interval = min_interval
         self._last_request_time: float = 0.0
+        self._lock = threading.Lock()
 
     def wait(self) -> None:
-        now = time.monotonic()
-        elapsed = now - self._last_request_time
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_request_time = time.monotonic()
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request_time
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_request_time = time.monotonic()
 
 
 _rate_limiter = _RateLimiter()
@@ -334,17 +338,22 @@ def normalize_dera_cf_record(raw: dict[str, Any]) -> dict[str, Any]:
 
 def _is_quarter_ingested_cf(
     conn: psycopg.Connection, year: int, quarter: int,
+    *, min_records: int = 10,
 ) -> bool:
-    """Check if a given quarter has already been ingested for DERA CF."""
+    """Check if a given quarter has already been ingested for DERA CF.
+
+    Returns True only if at least *min_records* exist for this quarter,
+    avoiding false positives from partial/failed ingests.
+    """
     from startuplens.db import execute_query
 
     rows = execute_query(
         conn,
-        "SELECT 1 FROM companies WHERE source = 'sec_dera_cf' "
-        "AND source_id LIKE %s LIMIT 1",
+        "SELECT COUNT(*) AS cnt FROM companies WHERE source = 'sec_dera_cf' "
+        "AND source_id LIKE %s",
         (f"%_q{year}Q{quarter}",),
     )
-    return len(rows) > 0
+    return rows[0]["cnt"] >= min_records
 
 
 # ---------------------------------------------------------------------------
@@ -367,12 +376,15 @@ def ingest_dera_cf_batch(conn: psycopg.Connection, records: list[dict]) -> int:
     for chunk_start in range(0, len(records), chunk_size):
         chunk = records[chunk_start: chunk_start + chunk_size]
 
-        # Deduplicate by source_id within chunk (keep first)
+        # Deduplicate by source_id within chunk (keep last/most recent).
+        # Multiple filings for the same CIK in one quarter (amendments,
+        # progress reports) are collapsed; the last filing typically has
+        # the most complete data. source_id = "{cik}_q{year}Q{quarter}".
         seen: dict[str, dict] = {}
         for rec in chunk:
             sid = rec.get("source_id", "")
-            if sid and sid not in seen:
-                seen[sid] = rec
+            if sid:
+                seen[sid] = rec  # last wins
         deduped = list(seen.values())
 
         if not deduped:
@@ -550,7 +562,10 @@ def ingest_dera_cf_batch(conn: psycopg.Connection, records: list[dict]) -> int:
                 )
 
         inserted += len(returned)
-        conn.commit()
+
+    # Commit entire batch atomically — avoids partial quarter ingests
+    # that would be skipped on retry by _is_quarter_ingested_cf().
+    conn.commit()
 
     logger.info("ingested_dera_cf_batch", inserted=inserted)
     return inserted
@@ -615,6 +630,99 @@ def _process_quarter(
         return {"status": "error", "quarter": quarter_key, "error": error_msg}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# CIK cross-referencing
+# ---------------------------------------------------------------------------
+
+
+def cross_reference_dera_cf(conn: psycopg.Connection) -> dict[str, int]:
+    """Link DERA CF entities to EDGAR and Form D entities by matching CIK.
+
+    Finds canonical entities from sec_dera_cf whose CIK (the portion of
+    source_id before ``_q``) matches an entity from sec_edgar or sec_form_d.
+    Merges the DERA CF entity into the existing one so all sources share
+    a single canonical entity.
+
+    Returns dict with counts: {ciks_matched, entities_merged, already_linked}.
+    """
+    from startuplens.db import execute_query
+    from startuplens.entity_resolution.probabilistic import merge_entities
+
+    # Find DERA CF entities whose CIK also appears in EDGAR or Form D.
+    # Use two separate queries because EDGAR entity_links store company
+    # UUID as source_identifier, while Form D stores source_id (CIK+quarter).
+    rows = execute_query(
+        conn,
+        """
+        WITH dera_ciks AS (
+            SELECT DISTINCT ON (SPLIT_PART(c.source_id, '_q', 1))
+                SPLIT_PART(c.source_id, '_q', 1) AS cik,
+                el.entity_id::text AS dera_entity_id
+            FROM entity_links el
+            JOIN companies c ON c.source_id = el.source_identifier
+                AND c.source = 'sec_dera_cf'
+            WHERE el.source = 'sec_dera_cf'
+            ORDER BY SPLIT_PART(c.source_id, '_q', 1), el.confidence DESC
+        ),
+        -- EDGAR: source_identifier = company UUID
+        edgar_ciks AS (
+            SELECT c.source_id AS cik,
+                   el.entity_id::text AS entity_id
+            FROM entity_links el
+            JOIN companies c ON c.id::text = el.source_identifier
+                AND c.source = 'sec_edgar'
+            WHERE el.source = 'sec_edgar'
+        ),
+        -- Form D: source_identifier = company UUID (legacy ingest)
+        formd_ciks AS (
+            SELECT DISTINCT ON (SPLIT_PART(c.source_id, '_q', 1))
+                SPLIT_PART(c.source_id, '_q', 1) AS cik,
+                el.entity_id::text AS entity_id
+            FROM entity_links el
+            JOIN companies c ON c.id::text = el.source_identifier
+                AND c.source = 'sec_form_d'
+            WHERE el.source = 'sec_form_d'
+            ORDER BY SPLIT_PART(c.source_id, '_q', 1), el.confidence DESC
+        )
+        SELECT DISTINCT ON (d.cik)
+            d.cik AS dera_cik,
+            d.dera_entity_id,
+            COALESCE(e.entity_id, f.entity_id) AS other_entity_id,
+            CASE WHEN e.entity_id IS NOT NULL THEN 'sec_edgar'
+                 ELSE 'sec_form_d' END AS other_source
+        FROM dera_ciks d
+        LEFT JOIN edgar_ciks e ON d.cik = e.cik
+        LEFT JOIN formd_ciks f ON d.cik = f.cik
+        WHERE (e.entity_id IS NOT NULL OR f.entity_id IS NOT NULL)
+          AND d.dera_entity_id != COALESCE(e.entity_id, f.entity_id)
+        ORDER BY d.cik
+        """,
+    )
+
+    stats = {"ciks_matched": 0, "entities_merged": 0, "already_linked": 0}
+
+    seen_dera_entities: set[str] = set()
+    for row in rows:
+        dera_eid = row["dera_entity_id"]
+        other_eid = row["other_entity_id"]
+
+        if dera_eid in seen_dera_entities:
+            stats["already_linked"] += 1
+            continue
+        seen_dera_entities.add(dera_eid)
+        stats["ciks_matched"] += 1
+
+        if dera_eid == other_eid:
+            stats["already_linked"] += 1
+            continue
+
+        merge_entities(conn, keep_id=other_eid, merge_id=dera_eid)
+        stats["entities_merged"] += 1
+
+    logger.info("cross_referenced_dera_cf", **stats)
+    return stats
 
 
 def run_dera_cf_pipeline(

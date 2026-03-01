@@ -444,14 +444,22 @@ class TestMergeEntities:
         ) as mock_eq:
             merge_entities(conn, keep_id="keep-uuid", merge_id="merge-uuid")
 
-            assert mock_eq.call_count == 2
-            # First call: UPDATE entity_links
-            update_call = mock_eq.call_args_list[0]
-            assert "UPDATE entity_links" in update_call[0][1]
-            assert update_call[0][2] == ("keep-uuid", "merge-uuid")
+            # 2 DELETEs (feature_store, backtest_holdout) +
+            # 6 UPDATEs (entity_links, companies, evaluations,
+            #   investments, anti_portfolio, deal_funnel) +
+            # 1 DELETE (canonical_entities)
+            assert mock_eq.call_count == 9
 
-            # Second call: DELETE canonical_entities
-            delete_call = mock_eq.call_args_list[1]
+            # Verify entity_links is updated
+            update_calls = [
+                c for c in mock_eq.call_args_list
+                if "UPDATE entity_links" in c[0][1]
+            ]
+            assert len(update_calls) == 1
+            assert update_calls[0][0][2] == ("keep-uuid", "merge-uuid")
+
+            # Last call: DELETE canonical_entities
+            delete_call = mock_eq.call_args_list[-1]
             assert "DELETE FROM canonical_entities" in delete_call[0][1]
             assert delete_call[0][2] == ("merge-uuid",)
 
