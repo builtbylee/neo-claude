@@ -105,7 +105,13 @@ def simulate_portfolio(
     n_selected = len(selected)
     total_invested = n_selected * policy.check_size
 
-    failure_rate = outcomes["failed"] / n_selected if n_selected > 0 else 0.0
+    # Exclude unknown outcomes from failure rate calculation
+    n_with_known_outcome = outcomes["trading"] + outcomes["exited"] + outcomes["failed"]
+    failure_rate = (
+        outcomes["failed"] / n_with_known_outcome
+        if n_with_known_outcome > 0
+        else 0.0
+    )
     abstention_rate = (
         1.0 - (n_selected / total_eligible) if total_eligible > 0 else 0.0
     )

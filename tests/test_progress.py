@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from startuplens.model.train import (
     PROGRESS_CATEGORICAL_FEATURES,
@@ -133,3 +132,59 @@ class TestTrainProgressModel:
         """Progress and survival models use the same categorical features."""
         from startuplens.model.train import CATEGORICAL_FEATURES
         assert PROGRESS_CATEGORICAL_FEATURES == CATEGORICAL_FEATURES
+
+
+# ------------------------------------------------------------------
+# Progress label cutoff_date regression
+# ------------------------------------------------------------------
+
+
+class TestProgressLabelCutoff:
+    """Verify cutoff_date caps both maturity gate and evidence windows."""
+
+    def test_cutoff_date_passed_five_times(self):
+        """cutoff_date must appear 3× in params: maturity gate, follow_on
+        evidence cap, revenue_progress evidence cap."""
+        from unittest.mock import MagicMock, patch
+
+        from startuplens.model.progress_labels import load_progress_labels
+
+        conn = MagicMock()
+        with patch("startuplens.model.progress_labels.execute_query",
+                    return_value=[]) as mock_eq:
+            load_progress_labels(conn, "2020-01-01", "2021-12-31",
+                                 cutoff_date="2022-06-30")
+
+        _conn, _sql, params = mock_eq.call_args[0]
+        assert params == (
+            "2020-01-01", "2021-12-31",
+            "2022-06-30", "2022-06-30", "2022-06-30",
+        )
+
+    def test_cutoff_defaults_to_end(self):
+        """When cutoff_date is omitted, it defaults to end."""
+        from unittest.mock import MagicMock, patch
+
+        from startuplens.model.progress_labels import load_progress_labels
+
+        conn = MagicMock()
+        with patch("startuplens.model.progress_labels.execute_query",
+                    return_value=[]) as mock_eq:
+            load_progress_labels(conn, "2020-01-01", "2021-12-31")
+
+        _conn, _sql, params = mock_eq.call_args[0]
+        # cutoff_date should be "2021-12-31" (= end) in all 3 positions
+        assert params[2] == "2021-12-31"
+        assert params[3] == "2021-12-31"
+        assert params[4] == "2021-12-31"
+
+    def test_query_contains_least_caps(self):
+        """Both evidence CTEs must use LEAST(..., cutoff_date) to cap."""
+        from startuplens.model.progress_labels import _PROGRESS_LABEL_QUERY
+
+        # Count LEAST occurrences — one per evidence CTE
+        least_count = _PROGRESS_LABEL_QUERY.upper().count("LEAST(")
+        assert least_count == 2, (
+            f"Expected 2 LEAST() caps (follow_on + revenue_progress), "
+            f"got {least_count}"
+        )

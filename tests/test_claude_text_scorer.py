@@ -1,162 +1,123 @@
-"""Tests for Claude text scorer prompt construction and response parsing."""
+"""Tests for Claude text scorer batch pipeline and response parsing."""
 
 from __future__ import annotations
 
-import json
-from unittest.mock import MagicMock
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from startuplens.scoring.claude_text_scorer import (
+    _SCORE_DIMENSIONS,
+    BATCH_SIZE,
     MODEL_ID,
     PROMPT_VERSION,
-    _SCORE_DIMENSIONS,
-    build_scoring_prompt,
-    score_text,
+    score_batch,
 )
 
-
 # ---------------------------------------------------------------------------
-# Prompt construction
+# Constants
 # ---------------------------------------------------------------------------
 
 
-class TestBuildScoringPrompt:
-    def test_returns_single_user_message(self):
-        messages = build_scoring_prompt("Some offering text")
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-
-    def test_includes_narrative_text(self):
-        messages = build_scoring_prompt("AI-powered widget for SMBs")
-        assert "AI-powered widget for SMBs" in messages[0]["content"]
-
-    def test_includes_context(self):
-        ctx = {"sector": "fintech", "funding_target": 100000}
-        messages = build_scoring_prompt("Some text", context=ctx)
-        assert "fintech" in messages[0]["content"]
-        assert "100000" in messages[0]["content"]
-
-    def test_truncates_long_text(self):
-        long_text = "x" * 50_000
-        messages = build_scoring_prompt(long_text)
-        assert "[Text truncated for length]" in messages[0]["content"]
-
-    def test_prompt_version_is_stable(self):
+class TestConstants:
+    def test_prompt_version_is_stable_hash(self):
         assert len(PROMPT_VERSION) == 12
         assert PROMPT_VERSION.isalnum()
 
+    def test_model_id_is_set(self):
+        assert MODEL_ID.startswith("claude-")
 
-# ---------------------------------------------------------------------------
-# Response parsing
-# ---------------------------------------------------------------------------
-
-
-def _mock_client(response_text: str) -> MagicMock:
-    """Create a mock Anthropic client that returns the given text."""
-    client = MagicMock()
-    content_block = MagicMock()
-    content_block.text = response_text
-    response = MagicMock()
-    response.content = [content_block]
-    client.messages.create.return_value = response
-    return client
-
-
-class TestScoreText:
-    def test_valid_response(self):
-        resp = json.dumps({
-            "clarity": 55,
-            "claims_plausibility": 40,
-            "problem_specificity": 60,
-            "differentiation_depth": 45,
-            "founder_domain_signal": 50,
-            "risk_honesty": 35,
-            "business_model_clarity": 65,
-            "text_quality_score": 50,
-            "red_flags": ["vague market claims"],
-            "reasoning": "Decent but vague in places.",
-        })
-        client = _mock_client(resp)
-        scores = score_text(client, "Some text")
-
-        assert scores is not None
-        assert scores["clarity"] == 55
-        assert scores["text_quality_score"] == 50
-        assert "vague market claims" in scores["red_flags"]
-
-    def test_markdown_fenced_response(self):
-        inner = json.dumps({
-            "clarity": 50,
-            "claims_plausibility": 50,
-            "problem_specificity": 50,
-            "differentiation_depth": 50,
-            "founder_domain_signal": 50,
-            "risk_honesty": 50,
-            "business_model_clarity": 50,
-            "text_quality_score": 50,
-            "red_flags": [],
-            "reasoning": "Average.",
-        })
-        resp = f"```json\n{inner}\n```"
-        client = _mock_client(resp)
-        scores = score_text(client, "Some text")
-        assert scores is not None
-        assert scores["clarity"] == 50
-
-    def test_invalid_json(self):
-        client = _mock_client("This is not JSON at all")
-        scores = score_text(client, "Some text")
-        assert scores is None
-
-    def test_missing_dimension(self):
-        resp = json.dumps({
-            "clarity": 50,
-            # Missing other dimensions
-            "text_quality_score": 50,
-            "red_flags": [],
-            "reasoning": "Incomplete.",
-        })
-        client = _mock_client(resp)
-        scores = score_text(client, "Some text")
-        assert scores is None
-
-    def test_out_of_range_score(self):
-        resp = json.dumps({
-            "clarity": 150,  # Out of range
-            "claims_plausibility": 50,
-            "problem_specificity": 50,
-            "differentiation_depth": 50,
-            "founder_domain_signal": 50,
-            "risk_honesty": 50,
-            "business_model_clarity": 50,
-            "text_quality_score": 50,
-            "red_flags": [],
-            "reasoning": "Bad score.",
-        })
-        client = _mock_client(resp)
-        scores = score_text(client, "Some text")
-        assert scores is None
-
-    def test_boundary_scores(self):
-        resp = json.dumps({
-            "clarity": 0,
-            "claims_plausibility": 100,
-            "problem_specificity": 0,
-            "differentiation_depth": 100,
-            "founder_domain_signal": 0,
-            "risk_honesty": 100,
-            "business_model_clarity": 0,
-            "text_quality_score": 50,
-            "red_flags": [],
-            "reasoning": "Extreme.",
-        })
-        client = _mock_client(resp)
-        scores = score_text(client, "Some text")
-        assert scores is not None
-        assert scores["clarity"] == 0
-        assert scores["claims_plausibility"] == 100
+    def test_batch_size_positive(self):
+        assert BATCH_SIZE > 0
 
     def test_all_dimensions_present(self):
         assert len(_SCORE_DIMENSIONS) == 8
         assert "text_quality_score" in _SCORE_DIMENSIONS
+        assert "clarity" in _SCORE_DIMENSIONS
+
+
+# ---------------------------------------------------------------------------
+# score_batch
+# ---------------------------------------------------------------------------
+
+
+def _mock_settings(api_key: str = "test-key") -> MagicMock:
+    settings = MagicMock()
+    settings.anthropic_api_key = api_key
+    return settings
+
+
+class TestScoreBatch:
+    def test_returns_zero_when_no_api_key(self):
+        conn = MagicMock()
+        settings = _mock_settings(api_key="")
+        result = score_batch(conn, settings)
+        assert result == 0
+
+    def test_returns_zero_when_no_texts(self):
+        conn = MagicMock()
+        settings = _mock_settings()
+        with patch(
+            "startuplens.scoring.claude_text_scorer._get_texts_to_score",
+            return_value=[],
+        ):
+            result = score_batch(conn, settings)
+        assert result == 0
+
+    def test_batches_texts_correctly(self):
+        """Verify texts are grouped into batches of BATCH_SIZE."""
+        conn = MagicMock()
+        settings = _mock_settings()
+
+        texts = [
+            {
+                "form_c_text_id": f"t{i}",
+                "company_id": f"c{i}",
+                "narrative_text": f"Company {i} offering",
+                "company_name": f"Co {i}",
+            }
+            for i in range(BATCH_SIZE + 3)
+        ]
+
+        with (
+            patch(
+                "startuplens.scoring.claude_text_scorer._get_texts_to_score",
+                return_value=texts,
+            ),
+            patch(
+                "startuplens.scoring.claude_text_scorer._score_batches_async",
+                new_callable=AsyncMock,
+                return_value=len(texts),
+            ) as mock_async,
+        ):
+            result = score_batch(conn, settings)
+
+        # Should have been called with 2 batches
+        call_args = mock_async.call_args
+        batches = call_args[0][2]  # third positional arg
+        assert len(batches) == 2
+        assert len(batches[0]) == BATCH_SIZE
+        assert len(batches[1]) == 3
+        assert result == len(texts)
+
+    def test_commits_after_scoring(self):
+        conn = MagicMock()
+        settings = _mock_settings()
+
+        with (
+            patch(
+                "startuplens.scoring.claude_text_scorer._get_texts_to_score",
+                return_value=[{
+                    "form_c_text_id": "t1",
+                    "company_id": "c1",
+                    "narrative_text": "text",
+                    "company_name": "Co",
+                }],
+            ),
+            patch(
+                "startuplens.scoring.claude_text_scorer._score_batches_async",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
+        ):
+            score_batch(conn, settings)
+
+        conn.commit.assert_called_once()

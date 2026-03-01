@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-
 from startuplens.pipelines.sec_edgar_text import (
     _parse_submission_text,
     extract_narrative_from_html,
     extract_narrative_from_xml,
 )
-
 
 # ---------------------------------------------------------------------------
 # Sample data

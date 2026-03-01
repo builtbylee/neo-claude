@@ -28,9 +28,9 @@ from startuplens.backtest.simulator import (
     simulate_portfolio,
 )
 from startuplens.backtest.splitter import generate_walk_forward_windows
+from startuplens.backtest.text_score_auc import compute_claude_text_auc
 from startuplens.config import get_settings
 from startuplens.db import execute_query, get_connection
-from startuplens.backtest.text_score_auc import compute_claude_text_auc
 from startuplens.model.progress_labels import load_progress_labels
 from startuplens.model.train import score_deals, train_model, train_progress_model
 
@@ -70,7 +70,9 @@ _FEATURE_QUERY = """
     LEFT JOIN LATERAL (
         SELECT revenue_growth_yoy
         FROM financial_data
-        WHERE company_id = c.id AND revenue_growth_yoy IS NOT NULL
+        WHERE company_id = c.id
+          AND revenue_growth_yoy IS NOT NULL
+          AND period_end_date <= tfw.as_of_date
         ORDER BY period_end_date DESC
         LIMIT 1
     ) fd ON true
@@ -104,8 +106,9 @@ def _rows_to_scored_deals(rows: list[dict], scores: list[float] | None = None) -
 
 
 _GROWTH_FEATURE_QUERY = """
-    SELECT DISTINCT ON (fd_r.company_id)
-        fd_r.company_id::text,
+    SELECT DISTINCT ON (r.company_id, r.as_of_date)
+        r.company_id::text,
+        r.as_of_date::text AS campaign_date,
         CASE WHEN fd_p.revenue IS NOT NULL AND fd_p.revenue > 0
              THEN (fd_r.revenue - fd_p.revenue) / fd_p.revenue
              ELSE NULL END AS revenue_growth_yoy,
@@ -120,30 +123,44 @@ _GROWTH_FEATURE_QUERY = """
         CASE WHEN fd_p.net_income IS NOT NULL
              THEN fd_r.net_income - fd_p.net_income
              ELSE NULL END AS net_income_improvement
-    FROM financial_data fd_r
+    FROM unnest(%s::uuid[], %s::date[]) AS r(company_id, as_of_date)
+    JOIN financial_data fd_r
+        ON fd_r.company_id = r.company_id
+        AND fd_r.period_type = 'annual'
+        AND fd_r.period_end_date <= r.as_of_date
     JOIN financial_data fd_p
         ON fd_p.company_id = fd_r.company_id
         AND fd_p.period_type = 'prior_annual'
         AND fd_p.period_end_date = fd_r.period_end_date
-    WHERE fd_r.period_type = 'annual'
-      AND fd_r.company_id = ANY(%s::uuid[])
-    ORDER BY fd_r.company_id, fd_r.period_end_date DESC
+    ORDER BY r.company_id, r.as_of_date, fd_r.period_end_date DESC
 """
 
 
 def _enrich_growth_features(conn, rows: list[dict]) -> None:
-    """Add YoY growth features to row dicts from financial_data prior/current pairs."""
-    company_ids = [r["company_id"] for r in rows if r.get("company_id")]
-    if not company_ids:
+    """Add YoY growth features per row, using each row's campaign_date as cutoff."""
+    pairs = [
+        (r["company_id"], r["campaign_date"])
+        for r in rows
+        if r.get("company_id") and r.get("campaign_date")
+    ]
+    if not pairs:
         return
 
-    growth_rows = execute_query(conn, _GROWTH_FEATURE_QUERY, (company_ids,))
-    growth_by_id = {r["company_id"]: r for r in growth_rows}
+    company_ids = [p[0] for p in pairs]
+    as_of_dates = [p[1] for p in pairs]
+
+    growth_rows = execute_query(
+        conn, _GROWTH_FEATURE_QUERY, (company_ids, as_of_dates),
+    )
+    growth_by_key = {
+        (r["company_id"], r["campaign_date"]): r for r in growth_rows
+    }
 
     for row in rows:
         cid = row.get("company_id")
-        if cid and cid in growth_by_id:
-            g = growth_by_id[cid]
+        cd = row.get("campaign_date")
+        if cid and cd and (cid, cd) in growth_by_key:
+            g = growth_by_key[(cid, cd)]
             row["revenue_growth_yoy"] = g.get("revenue_growth_yoy")
             row["asset_growth_yoy"] = g.get("asset_growth_yoy")
             row["cash_growth_yoy"] = g.get("cash_growth_yoy")
@@ -206,7 +223,7 @@ def main(
 
                 # Score ALL test deals (including unknown) for portfolio simulation
                 model_scores = score_deals(trained, test_rows)
-                model_scored_deals = _rows_to_scored_deals(test_rows, model_scores)
+                # model_scored_deals built after enrichment below
 
                 logger.info(
                     "model_trained",
@@ -228,19 +245,29 @@ def main(
                     test_labeled=len(test_labeled),
                 )
 
-            # --- Progress model ---
+            # --- Enrich growth features (per-row temporal cutoff) ---
             _enrich_growth_features(conn, train_rows)
             _enrich_growth_features(conn, test_rows)
 
+            # Build model ScoredDeals AFTER enrichment so revenue_growth
+            # reflects per-row-capped values for quality metrics.
+            if model_scores is not None:
+                model_scored_deals = _rows_to_scored_deals(
+                    test_rows, model_scores,
+                )
+
+            # --- Progress model ---
             train_progress = load_progress_labels(
                 conn,
                 window.train_start.isoformat(),
                 window.train_end.isoformat(),
+                cutoff_date=window.train_end.isoformat(),
             )
             test_progress = load_progress_labels(
                 conn,
                 window.test_start.isoformat(),
                 window.test_end.isoformat(),
+                cutoff_date=window.test_end.isoformat(),
             )
 
             progress_trained = train_progress_model(

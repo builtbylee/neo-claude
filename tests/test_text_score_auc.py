@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from startuplens.backtest.text_score_auc import (
     compute_claude_text_auc,
     compute_dimension_aucs,

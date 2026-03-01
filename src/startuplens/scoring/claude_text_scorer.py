@@ -156,6 +156,7 @@ def score_batch(
     scored = asyncio.run(
         _score_batches_async(conn, settings, batches, max_concurrent)
     )
+    conn.commit()
     return scored
 
 
@@ -319,7 +320,6 @@ def _store_scores(
                 MODEL_ID,
             ),
         )
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------

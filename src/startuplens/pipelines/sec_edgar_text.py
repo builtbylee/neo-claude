@@ -12,7 +12,6 @@ from __future__ import annotations
 import re
 import time
 import xml.etree.ElementTree as ET
-from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -338,7 +337,8 @@ def _extract_from_submission(submission_text: str, cik: str, accession: str) -> 
             content = doc["content"]
 
             # Detect HTML vs plain text
-            if "<html" in content.lower() or "<body" in content.lower() or "<div" in content.lower():
+            lower = content.lower()
+            if "<html" in lower or "<body" in lower or "<div" in lower:
                 text = extract_narrative_from_html(content)
             else:
                 # Plain text or XML — strip XML tags if present
@@ -534,6 +534,7 @@ def generate_profiles_from_db(
                    total_liabilities, employee_count, period_end_date
             FROM financial_data
             WHERE company_id = c.id
+              AND period_end_date <= co.campaign_date
             ORDER BY period_end_date DESC
             LIMIT 1
         ) fd ON true

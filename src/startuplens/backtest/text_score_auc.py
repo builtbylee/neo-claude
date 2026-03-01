@@ -38,6 +38,7 @@ def compute_claude_text_auc(conn: psycopg.Connection) -> float:
         FROM claude_text_scores s
         JOIN crowdfunding_outcomes co ON co.company_id = s.company_id
         WHERE co.outcome IN ('trading', 'exited', 'failed')
+          AND co.label_quality_tier <= 2
         """,
     )
 
@@ -97,6 +98,7 @@ def compute_dimension_aucs(conn: psycopg.Connection) -> dict[str, float]:
         FROM claude_text_scores s
         JOIN crowdfunding_outcomes co ON co.company_id = s.company_id
         WHERE co.outcome IN ('trading', 'exited', 'failed')
+          AND co.label_quality_tier <= 2
         """,
     )
 

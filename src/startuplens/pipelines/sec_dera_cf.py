@@ -322,8 +322,9 @@ def normalize_dera_cf_record(raw: dict[str, Any]) -> dict[str, Any]:
     else:
         result["instrument_type"] = "equity"
 
-    # Submission type
+    # Submission type and accession number (used for per-filing source_id)
     result["submission_type"] = (raw.get("SUBMISSION_TYPE", "") or "").strip()
+    result["accession_number"] = (raw.get("ACCESSION_NUMBER", "") or "").strip()
 
     # Platform (intermediary)
     result["platform_name"] = (raw.get("COMPANYNAME", "") or "").strip() or None
@@ -344,14 +345,16 @@ def _is_quarter_ingested_cf(
 
     Returns True only if at least *min_records* exist for this quarter,
     avoiding false positives from partial/failed ingests.
+    Matches both legacy ({cik}_q{y}Q{q}) and accession-suffixed
+    ({cik}_q{y}Q{q}_{acc}) source_id formats.
     """
     from startuplens.db import execute_query
 
     rows = execute_query(
         conn,
         "SELECT COUNT(*) AS cnt FROM companies WHERE source = 'sec_dera_cf' "
-        "AND source_id LIKE %s",
-        (f"%_q{year}Q{quarter}",),
+        "AND source_id ~ %s",
+        (f"_q{year}Q{quarter}($|_)",),
     )
     return rows[0]["cnt"] >= min_records
 
@@ -668,10 +671,15 @@ def _process_quarter(
         raw_records = parse_dera_cf_dataset(zip_path)
         normalized = [normalize_dera_cf_record(r) for r in raw_records]
 
-        # Add quarter suffix for resumability
+        # Build unique source_id per filing (accession number ensures
+        # multiple offerings by the same CIK in one quarter are kept).
         for rec in normalized:
             cik = rec.get("cik", "0")
-            rec["source_id"] = f"{cik}_q{year}Q{quarter}"
+            acc = rec.get("accession_number", "")
+            if acc:
+                rec["source_id"] = f"{cik}_q{year}Q{quarter}_{acc}"
+            else:
+                rec["source_id"] = f"{cik}_q{year}Q{quarter}"
 
         count = ingest_dera_cf_batch(conn, normalized)
 

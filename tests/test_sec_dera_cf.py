@@ -412,6 +412,48 @@ class TestIsQuarterIngested:
         conn = MagicMock()
         assert _is_quarter_ingested_cf(conn, 2024, 4) is False
 
+    @patch("startuplens.db.execute_query", return_value=[{"cnt": 50}])
+    def test_uses_regex_operator(self, mock_eq: MagicMock):
+        """Query must use ~ (regex) not LIKE, for robust pattern matching."""
+        conn = MagicMock()
+        _is_quarter_ingested_cf(conn, 2024, 4)
+        _conn, sql, params = mock_eq.call_args[0]
+        assert "~ %s" in sql
+        assert params == ("_q2024Q4($|_)",)
+
+
+class TestIsQuarterIngestedPattern:
+    """Verify the regex matches both legacy and accession-suffixed source_ids."""
+
+    def test_legacy_format_matches(self):
+        """Legacy: {cik}_q{year}Q{quarter}"""
+        import re
+        pattern = "_q2024Q4($|_)"
+        assert re.search(pattern, "1234567_q2024Q4")
+
+    def test_accession_suffixed_format_matches(self):
+        """New: {cik}_q{year}Q{quarter}_{accession}"""
+        import re
+        pattern = "_q2024Q4($|_)"
+        assert re.search(pattern, "1234567_q2024Q4_0001-24-000001")
+
+    def test_different_quarter_does_not_match(self):
+        import re
+        pattern = "_q2024Q4($|_)"
+        assert not re.search(pattern, "1234567_q2024Q3")
+        assert not re.search(pattern, "1234567_q2024Q3_0001-24-000001")
+
+    def test_different_year_does_not_match(self):
+        import re
+        pattern = "_q2024Q4($|_)"
+        assert not re.search(pattern, "1234567_q2023Q4")
+
+    def test_no_false_positive_on_partial_quarter(self):
+        """_q2024Q4 should not match _q2024Q41 (hypothetical)."""
+        import re
+        pattern = "_q2024Q4($|_)"
+        assert not re.search(pattern, "1234567_q2024Q41")
+
 
 # ---------------------------------------------------------------------------
 # run_dera_cf_pipeline (mocked)
