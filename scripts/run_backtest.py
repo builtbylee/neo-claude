@@ -35,16 +35,22 @@ def _load_deals_for_window(conn, window) -> list[ScoredDeal]:
         conn,
         """
         SELECT
-            entity_id::text,
-            sector,
-            platform,
-            as_of_date::text AS campaign_date,
-            COALESCE(revenue_at_raise > 0, false) AS has_revenue,
-            COALESCE(qualified_institutional, false) AS has_institutional_coinvestor,
-            COALESCE(eis_seis_eligible, false) AS eis_eligible,
-            'unknown' AS outcome
-        FROM training_features_wide
-        WHERE as_of_date BETWEEN %s AND %s
+            tfw.entity_id::text,
+            tfw.sector,
+            tfw.platform,
+            tfw.as_of_date::text AS campaign_date,
+            COALESCE(tfw.revenue_at_raise > 0, false) AS has_revenue,
+            COALESCE(tfw.qualified_institutional, false) AS has_institutional_coinvestor,
+            COALESCE(tfw.eis_seis_eligible, false) AS eis_eligible,
+            COALESCE(co.outcome, 'unknown') AS outcome
+        FROM training_features_wide tfw
+        LEFT JOIN entity_links el
+            ON el.entity_id = tfw.entity_id
+        LEFT JOIN companies c
+            ON c.id::text = el.source_identifier AND c.source = el.source
+        LEFT JOIN crowdfunding_outcomes co
+            ON co.company_id = c.id AND co.label_quality_tier <= 2
+        WHERE tfw.as_of_date BETWEEN %s AND %s
         """,
         (window.test_start.isoformat(), window.test_end.isoformat()),
     )

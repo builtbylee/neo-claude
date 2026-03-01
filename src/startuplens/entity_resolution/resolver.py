@@ -123,6 +123,149 @@ def run_entity_resolution(
 
 
 # ---------------------------------------------------------------------------
+# Bulk entity creation (for large single-source datasets like Form D)
+# ---------------------------------------------------------------------------
+
+def bulk_create_entities(
+    conn: psycopg.Connection,
+    records: list[dict],
+    *,
+    batch_size: int = 500,
+) -> dict[str, int]:
+    """Create canonical entities in bulk for records that each become their own entity.
+
+    Unlike ``run_entity_resolution``, this skips cross-source matching — each
+    record gets a new canonical entity and a corresponding entity link.  This
+    is appropriate for large single-source datasets (e.g., Form D companies)
+    where each record is already known to be unique within its source.
+
+    Parameters
+    ----------
+    conn:
+        Database connection.
+    records:
+        List of dicts with ``name``, ``country``, ``source``,
+        ``source_identifier`` keys.
+    batch_size:
+        Number of records per multi-row INSERT.
+
+    Returns
+    -------
+    dict
+        ``{"created": int, "skipped": int, "total": int}``
+    """
+    import uuid
+
+    from startuplens.entity_resolution.deterministic import normalize_name
+
+    created = 0
+    skipped = 0
+
+    for i in range(0, len(records), batch_size):
+        batch = records[i : i + batch_size]
+
+        # Pre-check which source_identifiers already have links
+        existing = set()
+        if batch:
+            from startuplens.db import execute_query
+
+            placeholders = ", ".join(
+                ["(%s, %s)"] * len(batch)
+            )
+            params: list[str] = []
+            for r in batch:
+                params.extend([r["source"], r["source_identifier"]])
+
+            rows = execute_query(
+                conn,
+                f"""
+                SELECT source, source_identifier
+                FROM entity_links
+                WHERE (source, source_identifier) IN ({placeholders})
+                """,
+                tuple(params),
+            )
+            existing = {(r["source"], r["source_identifier"]) for r in rows}
+
+        # Filter to new records only
+        new_records = [
+            r for r in batch
+            if (r["source"], r["source_identifier"]) not in existing
+        ]
+        skipped += len(batch) - len(new_records)
+
+        if not new_records:
+            continue
+
+        # Generate UUIDs and normalize names
+        entities = []
+        for r in new_records:
+            entity_id = str(uuid.uuid4())
+            link_id = str(uuid.uuid4())
+            norm_name = normalize_name(r["name"])
+            country = r.get("country", "US").lower()
+            entities.append({
+                "entity_id": entity_id,
+                "link_id": link_id,
+                "norm_name": norm_name,
+                "country": country,
+                "source": r["source"],
+                "source_identifier": r["source_identifier"],
+                "source_name": r["name"],
+            })
+
+        # Bulk INSERT into canonical_entities
+        ce_placeholders = ", ".join(
+            ["(%s, %s, %s)"] * len(entities)
+        )
+        ce_params: list[str] = []
+        for e in entities:
+            ce_params.extend([e["entity_id"], e["norm_name"], e["country"]])
+
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO canonical_entities (id, primary_name, country)
+                VALUES {ce_placeholders}
+                ON CONFLICT (id) DO NOTHING
+                """,
+                tuple(ce_params),
+            )
+
+        # Bulk INSERT into entity_links
+        el_placeholders = ", ".join(
+            ["(%s, %s, %s, %s, %s, %s, %s)"] * len(entities)
+        )
+        el_params: list[str] = []
+        for e in entities:
+            el_params.extend([
+                e["link_id"], e["entity_id"], e["source"],
+                e["source_identifier"], e["source_name"],
+                "exact_id", "100",
+            ])
+
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO entity_links
+                    (id, entity_id, source, source_identifier, source_name,
+                     match_method, confidence)
+                VALUES {el_placeholders}
+                ON CONFLICT (id) DO NOTHING
+                """,
+                tuple(el_params),
+            )
+
+        created += len(entities)
+
+        if (i + batch_size) % 5000 == 0:
+            conn.commit()
+
+    conn.commit()
+    return {"created": created, "skipped": skipped, "total": len(records)}
+
+
+# ---------------------------------------------------------------------------
 # Probabilistic pass
 # ---------------------------------------------------------------------------
 

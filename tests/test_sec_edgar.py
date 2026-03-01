@@ -12,6 +12,7 @@ from startuplens.pipelines.sec_edgar import (
     _classify_instrument_type,
     _classify_round_type,
     _RateLimiter,
+    derive_sec_outcomes,
     download_form_c_index,
     ingest_form_c_batch,
     normalize_form_c_record,
@@ -337,3 +338,42 @@ class TestRunSecPipeline:
         assert summary["quarters_skipped"] == 4
         assert summary["quarters_processed"] == 0
         assert summary["records_ingested"] == 0
+
+
+# ---------------------------------------------------------------------------
+# derive_sec_outcomes tests
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveSecOutcomes:
+    @patch("startuplens.db.execute_query")
+    def test_returns_count_from_db(self, mock_eq: MagicMock):
+        conn = MagicMock()
+        # First call is the INSERT ... SELECT (returns [])
+        # Second call is the COUNT query
+        mock_eq.side_effect = [[], [{"cnt": 42}]]
+
+        result = derive_sec_outcomes(conn)
+        assert result == 42
+        conn.commit.assert_called_once()
+
+    @patch("startuplens.db.execute_query")
+    def test_returns_zero_when_no_matches(self, mock_eq: MagicMock):
+        conn = MagicMock()
+        mock_eq.side_effect = [[], [{"cnt": 0}]]
+
+        result = derive_sec_outcomes(conn)
+        assert result == 0
+
+    @patch("startuplens.db.execute_query")
+    def test_insert_query_contains_cross_reference(self, mock_eq: MagicMock):
+        conn = MagicMock()
+        mock_eq.side_effect = [[], [{"cnt": 5}]]
+
+        derive_sec_outcomes(conn)
+
+        insert_sql = mock_eq.call_args_list[0][0][1]
+        assert "form_c" in insert_sql
+        assert "form_d_ciks" in insert_sql
+        assert "INSERT INTO crowdfunding_outcomes" in insert_sql
+        assert "sec_cross_reference" in insert_sql

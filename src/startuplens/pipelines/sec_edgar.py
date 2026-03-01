@@ -347,6 +347,92 @@ def ingest_form_c_batch(conn: psycopg.Connection, records: list[dict]) -> int:
     return inserted
 
 
+def derive_sec_outcomes(conn: psycopg.Connection) -> int:
+    """Derive outcome labels by cross-referencing Form C → Form D filings.
+
+    A Form C company whose CIK also appears in Form D filings is labelled
+    ``outcome='trading'`` with ``label_quality_tier=2`` (the Reg D filing
+    is evidence of continued fundraising / survival).
+
+    Form C companies filed >3 years ago with no Form D match get
+    ``outcome='unknown'``, ``label_quality_tier=3``.
+
+    Returns the number of rows inserted into ``crowdfunding_outcomes``.
+    """
+    from startuplens.db import execute_query
+
+    execute_query(
+        conn,
+        """
+        WITH form_c AS (
+            SELECT
+                c.id AS company_id,
+                c.sector,
+                c.country,
+                split_part(c.source_id, '_q', 1) AS cik,
+                MIN(fr.round_date) AS earliest_filing,
+                MIN(fr.amount_raised) AS amount_raised
+            FROM companies c
+            LEFT JOIN funding_rounds fr ON fr.company_id = c.id
+            WHERE c.source = 'sec_edgar'
+            GROUP BY c.id, c.sector, c.country,
+                     split_part(c.source_id, '_q', 1)
+        ),
+        form_d_ciks AS (
+            SELECT DISTINCT split_part(source_id, '_q', 1) AS cik
+            FROM companies
+            WHERE source = 'sec_form_d'
+        ),
+        to_insert AS (
+            SELECT
+                fc.company_id,
+                fc.earliest_filing AS campaign_date,
+                fc.amount_raised,
+                fc.sector,
+                fc.country,
+                CASE WHEN fd.cik IS NOT NULL
+                     THEN 'trading' ELSE 'unknown' END AS outcome,
+                CASE WHEN fd.cik IS NOT NULL
+                     THEN 2 ELSE 3 END AS label_quality_tier
+            FROM form_c fc
+            LEFT JOIN form_d_ciks fd ON fc.cik = fd.cik
+            WHERE NOT EXISTS (
+                SELECT 1 FROM crowdfunding_outcomes co
+                WHERE co.company_id = fc.company_id
+            )
+            AND (
+                fd.cik IS NOT NULL
+                OR fc.earliest_filing < CURRENT_DATE - INTERVAL '3 years'
+            )
+        )
+        INSERT INTO crowdfunding_outcomes (
+            company_id, campaign_date, amount_raised, sector, country,
+            outcome, stage_bucket, label_quality_tier, data_source
+        )
+        SELECT
+            company_id, campaign_date, amount_raised, sector, country,
+            outcome, 'seed', label_quality_tier, 'sec_cross_reference'
+        FROM to_insert
+        """,
+    )
+
+    # execute_query returns list of rows; for INSERT we need rowcount
+    # Re-query to get the count of inserted rows
+    count_rows = execute_query(
+        conn,
+        """
+        SELECT COUNT(*) AS cnt
+        FROM crowdfunding_outcomes
+        WHERE data_source = 'sec_cross_reference'
+        """,
+    )
+    inserted = count_rows[0]["cnt"] if count_rows else 0
+
+    conn.commit()
+    logger.info("derived_sec_outcomes", inserted=inserted)
+    return inserted
+
+
 def _classify_round_type(form_type: str | None) -> str:
     """Map SEC form type to our round_type taxonomy."""
     if form_type in ("C", "C-U"):

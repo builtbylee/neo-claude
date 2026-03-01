@@ -8,7 +8,7 @@ import typer
 
 from startuplens.config import get_settings
 from startuplens.db import get_connection
-from startuplens.pipelines.sec_edgar import run_sec_pipeline
+from startuplens.pipelines.sec_edgar import derive_sec_outcomes, run_sec_pipeline
 
 logger = structlog.get_logger(__name__)
 app = typer.Typer()
@@ -16,8 +16,11 @@ app = typer.Typer()
 
 @app.command()
 def main(
-    years: list[int] = typer.Argument(help="Years to ingest, e.g. 2021 2022 2023"),
+    years: list[int] = typer.Argument(None, help="Years to ingest, e.g. 2021 2022 2023"),
     output_dir: str = typer.Option("data/sec_edgar", help="Directory for downloaded files"),
+    derive_outcomes: bool = typer.Option(
+        False, "--derive-outcomes", help="Derive outcome labels from Form C/D cross-reference"
+    ),
 ) -> None:
     """Download and ingest SEC EDGAR Form C filings."""
     from pathlib import Path
@@ -26,6 +29,15 @@ def main(
     conn = get_connection(settings)
 
     try:
+        if derive_outcomes:
+            count = derive_sec_outcomes(conn)
+            logger.info("outcomes_derived", count=count)
+            return
+
+        if not years:
+            logger.error("no_years_specified")
+            raise typer.BadParameter("Provide years to ingest, or use --derive-outcomes")
+
         summary = run_sec_pipeline(conn, settings, years, output_dir=Path(output_dir))
         logger.info("sec_edgar_ingest_complete", **summary)
     finally:

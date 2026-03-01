@@ -19,6 +19,7 @@ from startuplens.entity_resolution.probabilistic import (
     merge_entities,
 )
 from startuplens.entity_resolution.resolver import (
+    bulk_create_entities,
     resolve_entity,
     run_entity_resolution,
 )
@@ -305,6 +306,97 @@ class TestRunEntityResolution:
         conn = MagicMock()
         stats = run_entity_resolution(conn, [])
         assert stats == {"matched": 0, "created": 0, "total": 0}
+
+
+# =========================================================================
+# bulk_create_entities
+# =========================================================================
+
+
+class TestBulkCreateEntities:
+    """Tests for bulk entity creation (Form D style)."""
+
+    def test_creates_entities_for_new_records(self):
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = lambda s: cursor
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        records = [
+            {
+                "name": "Alpha Corp", "country": "US",
+                "source": "sec_form_d", "source_identifier": "1",
+            },
+            {
+                "name": "Beta LLC", "country": "US",
+                "source": "sec_form_d", "source_identifier": "2",
+            },
+        ]
+
+        with patch(
+            "startuplens.db.execute_query",
+            return_value=[],  # No existing links
+        ):
+            stats = bulk_create_entities(conn, records, batch_size=500)
+            assert stats["created"] == 2
+            assert stats["skipped"] == 0
+            assert stats["total"] == 2
+
+    def test_skips_already_linked_records(self):
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = lambda s: cursor
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        records = [
+            {
+                "name": "Alpha Corp", "country": "US",
+                "source": "sec_form_d", "source_identifier": "1",
+            },
+            {
+                "name": "Beta LLC", "country": "US",
+                "source": "sec_form_d", "source_identifier": "2",
+            },
+        ]
+
+        with patch(
+            "startuplens.db.execute_query",
+            return_value=[
+                {"source": "sec_form_d", "source_identifier": "1"},
+            ],
+        ):
+            stats = bulk_create_entities(conn, records, batch_size=500)
+            assert stats["created"] == 1
+            assert stats["skipped"] == 1
+            assert stats["total"] == 2
+
+    def test_empty_records(self):
+        conn = MagicMock()
+        stats = bulk_create_entities(conn, [])
+        assert stats == {"created": 0, "skipped": 0, "total": 0}
+
+    def test_respects_batch_size(self):
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = lambda s: cursor
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        records = [
+            {
+                "name": f"Corp {i}", "country": "US",
+                "source": "sec_form_d", "source_identifier": str(i),
+            }
+            for i in range(5)
+        ]
+
+        with patch(
+            "startuplens.db.execute_query",
+            return_value=[],  # No existing links
+        ):
+            stats = bulk_create_entities(conn, records, batch_size=2)
+            assert stats["created"] == 5
+            assert stats["total"] == 5
+            # Should have committed multiple times (3 batches of 2,2,1)
 
 
 # =========================================================================

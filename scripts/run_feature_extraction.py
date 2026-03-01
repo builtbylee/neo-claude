@@ -41,6 +41,10 @@ def main(
         None, help="As-of date (YYYY-MM-DD). Defaults to today."
     ),
     label_tier: int = typer.Option(2, help="Default label quality tier"),
+    with_outcomes_only: bool = typer.Option(
+        False, "--with-outcomes-only",
+        help="Only extract features for entities that have crowdfunding outcomes",
+    ),
 ) -> None:
     """Extract features from all entities and write to the feature store."""
     target_date = date.fromisoformat(as_of_date) if as_of_date else date.today()
@@ -54,10 +58,50 @@ def main(
             """
             SELECT DISTINCT ON (ce.id)
                 ce.id::text AS entity_id,
-                c.*
+                c.name,
+                c.country,
+                c.sector,
+                c.source,
+                c.source_id,
+                c.sic_code,
+                c.founding_date,
+                c.founding_date AS incorporation_date,
+                co.campaign_date,
+                co.funding_target,
+                co.amount_raised AS outcome_amount_raised,
+                co.overfunding_ratio,
+                co.equity_offered AS equity_offered_pct,
+                co.pre_money_valuation,
+                co.investor_count,
+                co.funding_velocity_days,
+                co.eis_seis_eligible,
+                co.qualified_institutional_coinvestor AS qualified_institutional,
+                co.prior_vc_backing,
+                co.accelerator_alumni,
+                co.accelerator_name,
+                co.founder_count,
+                co.founder_domain_experience_years,
+                co.founder_prior_exits,
+                co.had_revenue,
+                co.revenue_at_raise,
+                co.revenue_model AS revenue_model_type,
+                co.company_age_at_raise_months,
+                co.stage_bucket,
+                co.outcome,
+                co.label_quality_tier,
+                fr.round_date,
+                fr.round_type,
+                fr.instrument_type,
+                fr.amount_raised AS round_amount_raised,
+                fr.platform
             FROM canonical_entities ce
             JOIN entity_links el ON el.entity_id = ce.id
-            JOIN companies c ON c.id::text = el.source_identifier AND el.source = c.source
+            JOIN companies c
+                ON c.id::text = el.source_identifier AND el.source = c.source
+            LEFT JOIN crowdfunding_outcomes co ON co.company_id = c.id
+            LEFT JOIN funding_rounds fr ON fr.company_id = c.id"""
+            + (" WHERE co.id IS NOT NULL" if with_outcomes_only else "")
+            + """
             ORDER BY ce.id, el.confidence DESC
             """,
         )
@@ -67,10 +111,16 @@ def main(
 
         for entity in entities:
             entity_id = entity["entity_id"]
+            # Use campaign/filing date as as_of_date for temporal correctness
+            entity_date = target_date
+            for date_field in ("campaign_date", "round_date"):
+                if entity.get(date_field):
+                    entity_date = entity[date_field]
+                    break
             for family_name, extractor in ALL_EXTRACTORS:
                 features = extractor(entity)
                 count = write_features_batch(
-                    conn, entity_id, features, target_date,
+                    conn, entity_id, features, entity_date,
                     source=f"extractor_{family_name}",
                     label_tier=label_tier,
                 )
