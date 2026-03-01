@@ -63,8 +63,8 @@ class TestThresholds:
             portfolio_failure_rate_vs_random=0.5,
             claude_text_score_auc=0.65,
             progress_auc=0.60,
-            abstention_rate=0.20,
-            max_sector_share=0.30,
+            model_uncertainty_rate=0.20,
+            top_k_sector_concentration=0.30,
         )
         defaults.update(overrides)
         return defaults
@@ -130,27 +130,32 @@ class TestThresholds:
         assert not prog.passed
         assert prog.must_pass is False
 
-    def test_abstention_rate_too_low(self):
-        results = evaluate_backtest(**self._base_kwargs(abstention_rate=0.05))
-        ab = next(r for r in results if r.name == "Abstention rate")
-        assert not ab.passed
-        assert ab.must_pass is False
+    def test_uncertainty_rate_pass(self):
+        results = evaluate_backtest(**self._base_kwargs(model_uncertainty_rate=0.15))
+        ur = next(r for r in results if r.name == "Model uncertainty rate")
+        assert ur.passed
+        assert ur.must_pass is False
 
-    def test_abstention_rate_too_high(self):
-        results = evaluate_backtest(**self._base_kwargs(abstention_rate=0.45))
-        ab = next(r for r in results if r.name == "Abstention rate")
-        assert not ab.passed
+    def test_uncertainty_rate_fail(self):
+        results = evaluate_backtest(**self._base_kwargs(model_uncertainty_rate=0.45))
+        ur = next(r for r in results if r.name == "Model uncertainty rate")
+        assert not ur.passed
 
-    def test_abstention_rate_in_range(self):
-        results = evaluate_backtest(**self._base_kwargs(abstention_rate=0.25))
-        ab = next(r for r in results if r.name == "Abstention rate")
-        assert ab.passed
+    def test_uncertainty_rate_boundary(self):
+        results = evaluate_backtest(**self._base_kwargs(model_uncertainty_rate=0.40))
+        ur = next(r for r in results if r.name == "Model uncertainty rate")
+        assert ur.passed
 
-    def test_sector_bias_advisory(self):
-        results = evaluate_backtest(**self._base_kwargs(max_sector_share=0.55))
-        sb = next(r for r in results if r.name == "Sector bias")
-        assert not sb.passed
-        assert sb.must_pass is False
+    def test_top_k_sector_concentration_fail(self):
+        results = evaluate_backtest(**self._base_kwargs(top_k_sector_concentration=0.55))
+        sc = next(r for r in results if r.name == "Top-K sector concentration")
+        assert not sc.passed
+        assert sc.must_pass is False
+
+    def test_top_k_sector_concentration_pass(self):
+        results = evaluate_backtest(**self._base_kwargs(top_k_sector_concentration=0.40))
+        sc = next(r for r in results if r.name == "Top-K sector concentration")
+        assert sc.passed
 
 
 # ------------------------------------------------------------------
@@ -188,9 +193,9 @@ class TestAllMustPassMet:
             portfolio_moic_vs_random=1.5,
             portfolio_failure_rate_vs_random=0.5,
             claude_text_score_auc=0.65,
-            progress_auc=0.40,       # advisory — fails
-            abstention_rate=0.05,    # advisory — fails
-            max_sector_share=0.80,   # advisory — fails
+            progress_auc=0.40,                  # advisory — fails
+            model_uncertainty_rate=0.50,         # advisory — fails
+            top_k_sector_concentration=0.80,     # advisory — fails
         )
         assert all_must_pass_met(results)
 
@@ -202,7 +207,7 @@ class TestAllMustPassMet:
             portfolio_failure_rate_vs_random=0.5,
             claude_text_score_auc=0.65,
             progress_auc=0.60,
-            abstention_rate=0.20,
-            max_sector_share=0.30,
+            model_uncertainty_rate=0.20,
+            top_k_sector_concentration=0.30,
         )
         assert len(results) == 8

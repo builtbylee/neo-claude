@@ -134,6 +134,7 @@ def main(
             test_labeled = [r for r in test_rows if r.get("outcome") in ("failed", "trading")]
 
             model_scored_deals = None
+            model_scores = None
             if len(train_labeled) >= 50 and len(test_labeled) >= 10:
                 trained = train_model(train_rows, test_rows)
                 all_model_aucs.append(trained.auc)
@@ -184,6 +185,22 @@ def main(
                 if model_pf else math.nan
             )
 
+            # Model uncertainty: fraction of scores in uncertain band (40-60)
+            uncertainty_rate = math.nan
+            if model_scores:
+                uncertain = sum(1 for s in model_scores if 40 <= s <= 60)
+                uncertainty_rate = uncertain / len(model_scores)
+
+            # Top-K sector concentration: sector share in top 50 model-ranked deals
+            # Only meaningful when deals have real sector labels (not all "unknown")
+            top_k_sector = math.nan
+            if model_scored_deals:
+                top_k = sorted(model_scored_deals, key=lambda d: d.score, reverse=True)[:50]
+                known_sectors = [d.sector for d in top_k if d.sector != "unknown"]
+                if known_sectors:
+                    sector_counts = Counter(known_sectors)
+                    top_k_sector = max(sector_counts.values()) / len(known_sectors)
+
             result = {
                 "window": window.label,
                 "deals": len(test_rows),
@@ -193,14 +210,9 @@ def main(
                 "momentum_failure_rate": momentum_pf.failure_rate,
                 "model_failure_rate": model_pf.failure_rate if model_pf else None,
                 "model_fail_vs_random": model_fail_vs_random,
-                "model_abstention_rate": model_pf.abstention_rate if model_pf else None,
+                "model_uncertainty_rate": uncertainty_rate,
+                "top_k_sector_concentration": top_k_sector,
             }
-
-            # Compute max sector share from model portfolio
-            if model_pf and model_pf.selected_deals:
-                sector_counts = Counter(d.sector for d in model_pf.selected_deals)
-                max_share = max(sector_counts.values()) / len(model_pf.selected_deals)
-                result["max_sector_share"] = max_share
 
             window_results.append(result)
 
@@ -227,10 +239,6 @@ def main(
             sum(w["model_fail_vs_random"] for w in model_windows) / n_model
             if n_model > 0 else math.nan
         )
-        avg_model_abstention = (
-            sum(w["model_abstention_rate"] for w in model_windows) / n_model
-            if n_model > 0 else math.nan
-        )
         avg_model_auc = (
             sum(all_model_aucs) / len(all_model_aucs)
             if all_model_aucs else math.nan
@@ -239,9 +247,21 @@ def main(
             sum(all_model_eces) / len(all_model_eces)
             if all_model_eces else math.nan
         )
-        avg_max_sector = (
-            sum(w.get("max_sector_share", 0) for w in model_windows) / n_model
-            if n_model > 0 else math.nan
+        uncertainty_windows = [
+            w for w in model_windows if not math.isnan(w["model_uncertainty_rate"])
+        ]
+        avg_uncertainty = (
+            sum(w["model_uncertainty_rate"] for w in uncertainty_windows)
+            / len(uncertainty_windows)
+            if uncertainty_windows else math.nan
+        )
+        sector_windows = [
+            w for w in model_windows if not math.isnan(w["top_k_sector_concentration"])
+        ]
+        avg_top_k_sector = (
+            sum(w["top_k_sector_concentration"] for w in sector_windows)
+            / len(sector_windows)
+            if sector_windows else math.nan
         )
 
         metrics = evaluate_backtest(
@@ -251,8 +271,8 @@ def main(
             portfolio_failure_rate_vs_random=avg_model_fail_vs_random,
             claude_text_score_auc=math.nan,  # Phase 4+: requires Claude scoring
             progress_auc=math.nan,  # Phase 4+: requires progress model
-            abstention_rate=avg_model_abstention,
-            max_sector_share=avg_max_sector,
+            model_uncertainty_rate=avg_uncertainty,
+            top_k_sector_concentration=avg_top_k_sector,
         )
 
         all_passed = all_must_pass_met(metrics)
@@ -266,7 +286,14 @@ def main(
             m.name: {"value": _safe(m.value), "threshold": m.threshold, "passed": m.passed}
             for m in metrics
         }
-        baselines_dict = {"per_window": window_results}
+        # Sanitize NaN values in per-window results for JSON serialization
+        def _sanitize_dict(d: dict) -> dict:
+            return {
+                k: (None if isinstance(v, float) and math.isnan(v) else v)
+                for k, v in d.items()
+            }
+
+        baselines_dict = {"per_window": [_sanitize_dict(w) for w in window_results]}
 
         features_active = list(
             trained.feature_importances.keys()

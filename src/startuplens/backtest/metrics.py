@@ -183,28 +183,37 @@ def _progress_auc(value: float) -> MetricResult:
 
 
 def _abstention_rate(value: float) -> MetricResult:
-    lo, hi = 0.10, 0.40
-    passed = lo <= value <= hi
+    """Model uncertainty rate: fraction of deals with P(fail) in [0.4, 0.6].
+
+    A good model should be decisive — most deals should get a clear
+    high or low probability, not cluster near 0.5.  An uncertainty rate
+    above 40% means the model can't distinguish most deals.
+    """
+    threshold = 0.40
     return MetricResult(
-        name="Abstention rate",
+        name="Model uncertainty rate",
         value=value,
-        threshold=lo,  # store lower bound as the primary threshold
-        passed=passed,
+        threshold=threshold,
+        passed=value <= threshold,
         must_pass=False,
         failure_explanation=(
-            "Below 10%: gates too loose."
-            if value < lo
-            else "Above 40%: gates too strict, tool unusable."
-            if value > hi
-            else ""
+            "Model is uncertain on too many deals. "
+            "Investigate feature quality or class balance."
+            if value > threshold else ""
         ),
     )
 
 
 def _sector_bias(max_sector_share: float) -> MetricResult:
+    """Sector concentration in top-K model-ranked deals.
+
+    Measures whether the model systematically favours one sector in its
+    top-ranked deals (e.g. top 50), independent of portfolio policy size.
+    A value above 0.50 means one sector dominates the model's picks.
+    """
     threshold = 0.50
     return MetricResult(
-        name="Sector bias",
+        name="Top-K sector concentration",
         value=max_sector_share,
         threshold=threshold,
         passed=max_sector_share <= threshold,
@@ -228,8 +237,8 @@ def evaluate_backtest(
     portfolio_failure_rate_vs_random: float,
     claude_text_score_auc: float,
     progress_auc: float = math.nan,
-    abstention_rate: float = math.nan,
-    max_sector_share: float = math.nan,
+    model_uncertainty_rate: float = math.nan,
+    top_k_sector_concentration: float = math.nan,
 ) -> list[MetricResult]:
     """Evaluate all backtest metrics against their thresholds.
 
@@ -245,8 +254,8 @@ def evaluate_backtest(
         _portfolio_failure_rate_vs_random(portfolio_failure_rate_vs_random),
         _claude_text_score_auc(claude_text_score_auc),
         _progress_auc(progress_auc),
-        _abstention_rate(abstention_rate),
-        _sector_bias(max_sector_share),
+        _abstention_rate(model_uncertainty_rate),
+        _sector_bias(top_k_sector_concentration),
     ]
     return results
 
