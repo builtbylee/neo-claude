@@ -47,7 +47,7 @@ def _load_deals_for_window(conn, window) -> list[ScoredDeal]:
         LEFT JOIN entity_links el
             ON el.entity_id = tfw.entity_id
         LEFT JOIN companies c
-            ON c.id::text = el.source_identifier AND c.source = el.source
+            ON c.source_id = el.source_identifier AND c.source = el.source
         LEFT JOIN crowdfunding_outcomes co
             ON co.company_id = c.id AND co.label_quality_tier <= 2
         WHERE tfw.as_of_date BETWEEN %s AND %s
@@ -90,7 +90,8 @@ def main(
 
     try:
         windows = generate_walk_forward_windows()
-        all_deals: list[ScoredDeal] = []
+        prior_deals: list[ScoredDeal] = []
+        window_results: list[dict] = []
 
         for window in windows:
             deals = _load_deals_for_window(conn, window)
@@ -99,66 +100,87 @@ def main(
                 window=window.label,
                 deals=len(deals),
             )
-            all_deals.extend(deals)
+            if not deals:
+                prior_deals.extend(deals)
+                continue
 
-        if not all_deals:
+            # Score baselines per-window (walk-forward: only prior data for momentum)
+            random_scored = random_baseline(deals)
+            heuristic_scored = heuristic_baseline(deals)
+            momentum_scored = sector_momentum_baseline(deals, prior_deals or deals)
+
+            # Simulate portfolios per-window
+            random_pf = simulate_portfolio(random_scored, policy)
+            heuristic_pf = simulate_portfolio(heuristic_scored, policy)
+            momentum_pf = simulate_portfolio(momentum_scored, policy)
+
+            random_fail = random_pf.failure_rate or 1.0
+            fail_vs_random = (
+                heuristic_pf.failure_rate / random_fail if random_fail else 1.0
+            )
+
+            window_results.append({
+                "window": window.label,
+                "deals": len(deals),
+                "random_failure_rate": random_pf.failure_rate,
+                "heuristic_failure_rate": heuristic_pf.failure_rate,
+                "momentum_failure_rate": momentum_pf.failure_rate,
+                "fail_vs_random": fail_vs_random,
+                "abstention_rate": heuristic_pf.abstention_rate,
+            })
+
+            logger.info(
+                "window_result",
+                window=window.label,
+                random_fail=f"{random_pf.failure_rate:.3f}",
+                heuristic_fail=f"{heuristic_pf.failure_rate:.3f}",
+                momentum_fail=f"{momentum_pf.failure_rate:.3f}",
+            )
+
+            prior_deals.extend(deals)
+
+        if not window_results:
             logger.warning("no_deals_found")
             return
 
-        # Run baselines
-        random_scored = random_baseline(all_deals)
-        heuristic_scored = heuristic_baseline(all_deals)
-        momentum_scored = sector_momentum_baseline(all_deals, all_deals)
-
-        # Simulate portfolios
-        random_portfolio = simulate_portfolio(random_scored, policy)
-        heuristic_portfolio = simulate_portfolio(heuristic_scored, policy)
-        momentum_portfolio = simulate_portfolio(momentum_scored, policy)
-
-        # Evaluate metrics (using random baseline as reference)
-        # Compute ratios that evaluate_backtest expects
-        random_moic = random_portfolio.moic or 1.0
-        moic_vs_random = 1.0 / random_moic if random_moic else 1.0  # placeholder model MOIC
-        random_fail = random_portfolio.failure_rate or 1.0
-        fail_vs_random = heuristic_portfolio.failure_rate / random_fail if random_fail else 1.0
+        # Aggregate metrics across windows (mean)
+        n = len(window_results)
+        avg_fail_vs_random = sum(w["fail_vs_random"] for w in window_results) / n
+        avg_abstention = sum(w["abstention_rate"] for w in window_results) / n
 
         metrics = evaluate_backtest(
             survival_auc=0.5,  # Placeholder — real model AUC goes here
             calibration_ece=0.5,
-            portfolio_moic_vs_random=moic_vs_random,
-            portfolio_failure_rate_vs_random=fail_vs_random,
+            portfolio_moic_vs_random=1.0,  # Placeholder — no returns model yet
+            portfolio_failure_rate_vs_random=avg_fail_vs_random,
             claude_text_score_auc=0.5,
             progress_auc=0.5,
-            abstention_rate=heuristic_portfolio.abstention_rate,
+            abstention_rate=avg_abstention,
             max_sector_share=0.0,
         )
 
         all_passed = all_must_pass_met(metrics)
 
-        # Log provenance
+        # Log provenance with per-window detail
         metrics_dict = {m.name: m.value for m in metrics}
         pass_fail_dict = {
             m.name: {"value": m.value, "threshold": m.threshold, "passed": m.passed}
             for m in metrics
         }
-        baselines_dict = {
-            "random": {"failure_rate": random_portfolio.failure_rate},
-            "heuristic": {"failure_rate": heuristic_portfolio.failure_rate},
-            "momentum": {"failure_rate": momentum_portfolio.failure_rate},
-        }
+        baselines_dict = {"per_window": window_results}
 
         run_id = log_backtest_run(
             conn,
             model_family=model_family,
             data_snapshot_date=date.today(),
             train_window="2016-2022",
-            test_window="2023-2025",
+            test_window="2019-2025",
             features_active=[],
             metrics=metrics_dict,
             baselines=baselines_dict,
             pass_fail=pass_fail_dict,
             all_passed=all_passed,
-            notes="CLI backtest run",
+            notes="CLI walk-forward backtest (per-window evaluation)",
         )
 
         conn.commit()
@@ -166,6 +188,7 @@ def main(
             "backtest_complete",
             run_id=run_id,
             all_passed=all_passed,
+            windows_evaluated=n,
             metrics={m.name: f"{m.value:.3f}" for m in metrics},
         )
 

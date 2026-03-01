@@ -375,6 +375,36 @@ class TestBulkCreateEntities:
         stats = bulk_create_entities(conn, [])
         assert stats == {"created": 0, "skipped": 0, "total": 0}
 
+    def test_deduplicates_within_batch(self):
+        """Duplicate (source, source_identifier) pairs in the same batch are deduped."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__ = lambda s: cursor
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        records = [
+            {
+                "name": "Alpha Corp", "country": "US",
+                "source": "sec_form_d", "source_identifier": "1",
+            },
+            {
+                "name": "Alpha Corp (dup)", "country": "US",
+                "source": "sec_form_d", "source_identifier": "1",
+            },
+            {
+                "name": "Beta LLC", "country": "US",
+                "source": "sec_form_d", "source_identifier": "2",
+            },
+        ]
+
+        with patch(
+            "startuplens.db.execute_query",
+            return_value=[],  # No existing links
+        ):
+            stats = bulk_create_entities(conn, records, batch_size=500)
+            assert stats["created"] == 2  # Only 2 unique records
+            assert stats["total"] == 3
+
     def test_respects_batch_size(self):
         conn = MagicMock()
         cursor = MagicMock()

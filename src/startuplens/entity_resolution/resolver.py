@@ -164,6 +164,16 @@ def bulk_create_entities(
     for i in range(0, len(records), batch_size):
         batch = records[i : i + batch_size]
 
+        # Deduplicate within the batch (keep first occurrence)
+        seen_in_batch: set[tuple[str, str]] = set()
+        deduped_batch: list[dict] = []
+        for r in batch:
+            key = (r["source"], r["source_identifier"])
+            if key not in seen_in_batch:
+                seen_in_batch.add(key)
+                deduped_batch.append(r)
+        batch = deduped_batch
+
         # Pre-check which source_identifiers already have links
         existing = set()
         if batch:
@@ -251,7 +261,7 @@ def bulk_create_entities(
                     (id, entity_id, source, source_identifier, source_name,
                      match_method, confidence)
                 VALUES {el_placeholders}
-                ON CONFLICT (id) DO NOTHING
+                ON CONFLICT (source, source_identifier) DO NOTHING
                 """,
                 tuple(el_params),
             )

@@ -102,7 +102,11 @@ def sector_momentum_baseline(
 
     for deal in deals:
         deal_date = date.fromisoformat(deal.campaign_date)
-        lookback_start = date(deal_date.year - lookback_years, deal_date.month, deal_date.day)
+        try:
+            lookback_start = date(deal_date.year - lookback_years, deal_date.month, deal_date.day)
+        except ValueError:
+            # Handle Feb 29 → Feb 28 for non-leap years
+            lookback_start = date(deal_date.year - lookback_years, deal_date.month, 28)
 
         # Count sector outcomes in lookback window
         sector_total = 0

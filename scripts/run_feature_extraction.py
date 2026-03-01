@@ -97,7 +97,7 @@ def main(
             FROM canonical_entities ce
             JOIN entity_links el ON el.entity_id = ce.id
             JOIN companies c
-                ON c.id::text = el.source_identifier AND el.source = c.source
+                ON c.source_id = el.source_identifier AND el.source = c.source
             LEFT JOIN crowdfunding_outcomes co ON co.company_id = c.id
             LEFT JOIN funding_rounds fr ON fr.company_id = c.id"""
             + (" WHERE co.id IS NOT NULL" if with_outcomes_only else "")

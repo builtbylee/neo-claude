@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import psycopg
@@ -121,7 +122,8 @@ def write_features_batch(
         if value is None:
             continue
         feat = get_feature(name)
-        feature_value = json.dumps({"value": value})
+        v = float(value) if isinstance(value, Decimal) else value
+        feature_value = json.dumps({"value": v})
         params_list.append(
             (entity_id, as_of_date, feat.family, name, feature_value, source, label_tier)
         )

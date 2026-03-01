@@ -50,7 +50,7 @@ def main(
                 c.source
             FROM companies c
             LEFT JOIN entity_links el
-                ON el.source = c.source AND el.source_identifier = c.id::text
+                ON el.source = c.source AND el.source_identifier = c.source_id
             WHERE el.id IS NULL
         """
         params: tuple = ()

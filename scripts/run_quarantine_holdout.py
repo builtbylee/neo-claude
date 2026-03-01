@@ -34,7 +34,7 @@ def main(
             SELECT DISTINCT ce.id::text AS entity_id
             FROM canonical_entities ce
             JOIN entity_links el ON el.entity_id = ce.id
-            JOIN companies c ON c.id::text = el.source_identifier AND el.source = c.source
+            JOIN companies c ON c.source_id = el.source_identifier AND el.source = c.source
             JOIN funding_rounds fr ON fr.company_id = c.id
             WHERE fr.round_date BETWEEN %s AND %s
             """,
