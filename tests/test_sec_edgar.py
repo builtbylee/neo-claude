@@ -347,20 +347,21 @@ class TestRunSecPipeline:
 
 class TestDeriveSecOutcomes:
     @patch("startuplens.db.execute_query")
-    def test_returns_count_from_db(self, mock_eq: MagicMock):
+    def test_returns_count_of_inserted_rows(self, mock_eq: MagicMock):
         conn = MagicMock()
-        # First call is the INSERT ... SELECT (returns [])
-        # Second call is the COUNT query
-        mock_eq.side_effect = [[], [{"cnt": 42}]]
+        # INSERT...RETURNING returns one dict per inserted row
+        mock_eq.return_value = [
+            {"company_id": 1}, {"company_id": 2}, {"company_id": 3},
+        ]
 
         result = derive_sec_outcomes(conn)
-        assert result == 42
+        assert result == 3
         conn.commit.assert_called_once()
 
     @patch("startuplens.db.execute_query")
     def test_returns_zero_when_no_matches(self, mock_eq: MagicMock):
         conn = MagicMock()
-        mock_eq.side_effect = [[], [{"cnt": 0}]]
+        mock_eq.return_value = []
 
         result = derive_sec_outcomes(conn)
         assert result == 0
@@ -368,7 +369,7 @@ class TestDeriveSecOutcomes:
     @patch("startuplens.db.execute_query")
     def test_insert_query_contains_cross_reference(self, mock_eq: MagicMock):
         conn = MagicMock()
-        mock_eq.side_effect = [[], [{"cnt": 5}]]
+        mock_eq.return_value = [{"company_id": 5}]
 
         derive_sec_outcomes(conn)
 
@@ -377,3 +378,15 @@ class TestDeriveSecOutcomes:
         assert "form_d_ciks" in insert_sql
         assert "INSERT INTO crowdfunding_outcomes" in insert_sql
         assert "sec_cross_reference" in insert_sql
+        assert "RETURNING company_id" in insert_sql
+
+    @patch("startuplens.db.execute_query")
+    def test_derives_campaign_date_from_source_id(self, mock_eq: MagicMock):
+        conn = MagicMock()
+        mock_eq.return_value = []
+
+        derive_sec_outcomes(conn)
+
+        insert_sql = mock_eq.call_args_list[0][0][1]
+        assert "make_date" in insert_sql
+        assert "split_part(c.source_id, '_q', 2)" in insert_sql

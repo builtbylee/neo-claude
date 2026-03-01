@@ -68,7 +68,7 @@ def main(
                 c.founding_date AS incorporation_date,
                 co.campaign_date,
                 co.funding_target,
-                co.amount_raised AS outcome_amount_raised,
+                co.amount_raised,
                 co.overfunding_ratio,
                 co.equity_offered AS equity_offered_pct,
                 co.pre_money_valuation,
@@ -80,8 +80,8 @@ def main(
                 co.accelerator_alumni,
                 co.accelerator_name,
                 co.founder_count,
-                co.founder_domain_experience_years,
-                co.founder_prior_exits,
+                co.founder_domain_experience_years AS domain_experience_years,
+                co.founder_prior_exits AS prior_exits,
                 co.had_revenue,
                 co.revenue_at_raise,
                 co.revenue_model AS revenue_model_type,
@@ -92,7 +92,7 @@ def main(
                 fr.round_date,
                 fr.round_type,
                 fr.instrument_type,
-                fr.amount_raised AS round_amount_raised,
+                fr.amount_raised AS fr_amount_raised,
                 fr.platform
             FROM canonical_entities ce
             JOIN entity_links el ON el.entity_id = ce.id
@@ -102,7 +102,9 @@ def main(
             LEFT JOIN funding_rounds fr ON fr.company_id = c.id"""
             + (" WHERE co.id IS NOT NULL" if with_outcomes_only else "")
             + """
-            ORDER BY ce.id, el.confidence DESC
+            ORDER BY ce.id, el.confidence DESC,
+                co.campaign_date DESC NULLS LAST,
+                fr.round_date DESC NULLS LAST
             """,
         )
 

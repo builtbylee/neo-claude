@@ -34,7 +34,7 @@ def _load_deals_for_window(conn, window) -> list[ScoredDeal]:
     rows = execute_query(
         conn,
         """
-        SELECT
+        SELECT DISTINCT ON (tfw.entity_id, tfw.as_of_date)
             tfw.entity_id::text,
             tfw.sector,
             tfw.platform,
@@ -51,6 +51,7 @@ def _load_deals_for_window(conn, window) -> list[ScoredDeal]:
         LEFT JOIN crowdfunding_outcomes co
             ON co.company_id = c.id AND co.label_quality_tier <= 2
         WHERE tfw.as_of_date BETWEEN %s AND %s
+        ORDER BY tfw.entity_id, tfw.as_of_date, el.confidence DESC
         """,
         (window.test_start.isoformat(), window.test_end.isoformat()),
     )

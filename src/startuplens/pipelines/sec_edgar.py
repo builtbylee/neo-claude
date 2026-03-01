@@ -361,7 +361,7 @@ def derive_sec_outcomes(conn: psycopg.Connection) -> int:
     """
     from startuplens.db import execute_query
 
-    execute_query(
+    inserted_rows = execute_query(
         conn,
         """
         WITH form_c AS (
@@ -370,13 +370,26 @@ def derive_sec_outcomes(conn: psycopg.Connection) -> int:
                 c.sector,
                 c.country,
                 split_part(c.source_id, '_q', 1) AS cik,
-                MIN(fr.round_date) AS earliest_filing,
+                -- Derive campaign date from source_id quarter suffix
+                -- source_id format: {cik}_q{year}Q{quarter}
+                make_date(
+                    split_part(
+                        split_part(c.source_id, '_q', 2), 'Q', 1
+                    )::int,
+                    CASE split_part(
+                        split_part(c.source_id, '_q', 2), 'Q', 2
+                    )
+                        WHEN '1' THEN 2 WHEN '2' THEN 5
+                        WHEN '3' THEN 8 WHEN '4' THEN 11
+                        ELSE 2
+                    END,
+                    15
+                ) AS campaign_date,
                 MIN(fr.amount_raised) AS amount_raised
             FROM companies c
             LEFT JOIN funding_rounds fr ON fr.company_id = c.id
             WHERE c.source = 'sec_edgar'
-            GROUP BY c.id, c.sector, c.country,
-                     split_part(c.source_id, '_q', 1)
+            GROUP BY c.id, c.sector, c.country, c.source_id
         ),
         form_d_ciks AS (
             SELECT DISTINCT split_part(source_id, '_q', 1) AS cik
@@ -386,7 +399,7 @@ def derive_sec_outcomes(conn: psycopg.Connection) -> int:
         to_insert AS (
             SELECT
                 fc.company_id,
-                fc.earliest_filing AS campaign_date,
+                fc.campaign_date,
                 fc.amount_raised,
                 fc.sector,
                 fc.country,
@@ -402,7 +415,7 @@ def derive_sec_outcomes(conn: psycopg.Connection) -> int:
             )
             AND (
                 fd.cik IS NOT NULL
-                OR fc.earliest_filing < CURRENT_DATE - INTERVAL '3 years'
+                OR fc.campaign_date < CURRENT_DATE - INTERVAL '3 years'
             )
         )
         INSERT INTO crowdfunding_outcomes (
@@ -413,20 +426,10 @@ def derive_sec_outcomes(conn: psycopg.Connection) -> int:
             company_id, campaign_date, amount_raised, sector, country,
             outcome, 'seed', label_quality_tier, 'sec_cross_reference'
         FROM to_insert
+        RETURNING company_id
         """,
     )
-
-    # execute_query returns list of rows; for INSERT we need rowcount
-    # Re-query to get the count of inserted rows
-    count_rows = execute_query(
-        conn,
-        """
-        SELECT COUNT(*) AS cnt
-        FROM crowdfunding_outcomes
-        WHERE data_source = 'sec_cross_reference'
-        """,
-    )
-    inserted = count_rows[0]["cnt"] if count_rows else 0
+    inserted = len(inserted_rows)
 
     conn.commit()
     logger.info("derived_sec_outcomes", inserted=inserted)
