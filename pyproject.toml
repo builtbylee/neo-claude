@@ -23,6 +23,9 @@ dependencies = [
     "scikit-learn>=1.4",
     "shap>=0.45",
 
+    # HTML parsing
+    "beautifulsoup4>=4.12",
+
     # LLM
     "anthropic>=0.40",
 
