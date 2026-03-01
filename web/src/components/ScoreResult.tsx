@@ -26,6 +26,8 @@ interface ScoreResultProps {
       reason: string;
     }>;
     matchedCompany: string | null;
+    dataSource: "user" | "website" | "ai_knowledge" | "none";
+    generatedProfile: string | null;
   };
 }
 
@@ -37,16 +39,14 @@ const REC_COLORS: Record<string, string> = {
   abstain: "bg-neutral-600",
 };
 
-const REC_TEXT_COLORS: Record<string, string> = {
-  invest: "text-green-400",
-  deep_diligence: "text-blue-400",
-  watch: "text-yellow-400",
-  pass: "text-red-400",
-  abstain: "text-neutral-400",
+const SOURCE_LABELS: Record<string, string> = {
+  user: "AI analysis of your pitch text",
+  website: "AI analysis of website content",
+  ai_knowledge: "AI analysis from training knowledge",
+  none: "No text analysis available",
 };
 
 function ScoreGauge({ score, range }: { score: number; range: number }) {
-  const angle = (score / 100) * 180 - 90;
   const color =
     score >= 65
       ? "#22c55e"
@@ -59,7 +59,6 @@ function ScoreGauge({ score, range }: { score: number; range: number }) {
   return (
     <div className="flex flex-col items-center">
       <div className="relative w-48 h-24 overflow-hidden">
-        {/* Background arc */}
         <svg viewBox="0 0 200 100" className="w-full h-full">
           <path
             d="M 10 100 A 90 90 0 0 1 190 100"
@@ -121,10 +120,15 @@ function CategoryBar({
 
 export default function ScoreResult({ result }: ScoreResultProps) {
   const recColor = REC_COLORS[result.recommendation.class] ?? "bg-neutral-600";
-  const recTextColor =
-    REC_TEXT_COLORS[result.recommendation.class] ?? "text-neutral-400";
 
   const failedGates = result.gates.filter((g) => !g.passed);
+
+  const extractedHeading =
+    result.dataSource === "website"
+      ? "Extracted from Website"
+      : result.dataSource === "ai_knowledge"
+        ? "Extracted from AI Knowledge"
+        : "Extracted from Pitch Text";
 
   return (
     <div className="space-y-6">
@@ -160,11 +164,32 @@ export default function ScoreResult({ result }: ScoreResultProps) {
         </div>
       </div>
 
+      {/* AI-Generated Company Profile (knowledge mode) */}
+      {result.dataSource === "ai_knowledge" && result.generatedProfile && (
+        <div className="bg-amber-950/20 rounded-xl p-5 border border-amber-800/30">
+          <h3 className="text-sm font-semibold text-amber-400 mb-2">
+            AI-Generated Company Profile
+          </h3>
+          <p className="text-sm text-neutral-300 italic">
+            {result.generatedProfile}
+          </p>
+          <p className="text-xs text-amber-600 mt-2">
+            Based on AI training data — may not reflect current state
+          </p>
+        </div>
+      )}
+
       {/* Claude Text Analysis */}
       {result.textScores && (
         <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
           <h3 className="text-sm font-semibold text-neutral-300 mb-4">
             AI Text Analysis
+            {result.dataSource === "website" && (
+              <span className="text-xs text-neutral-500 ml-2">(from website)</span>
+            )}
+            {result.dataSource === "ai_knowledge" && (
+              <span className="text-xs text-amber-500 ml-2">(from AI knowledge)</span>
+            )}
           </h3>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {Object.entries(result.textScores).map(([dim, score]) => (
@@ -183,7 +208,7 @@ export default function ScoreResult({ result }: ScoreResultProps) {
       {result.extractedFacts && Object.values(result.extractedFacts).some((v) => v !== null) && (
         <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
           <h3 className="text-sm font-semibold text-neutral-300 mb-3">
-            Extracted from Pitch Text
+            {extractedHeading}
           </h3>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
             {result.extractedFacts.revenue !== null && (
@@ -254,12 +279,10 @@ export default function ScoreResult({ result }: ScoreResultProps) {
         </div>
       )}
 
-      {/* Data Completeness */}
+      {/* Data Completeness + Source */}
       <div className="flex items-center justify-between text-sm text-neutral-500 pt-2 border-t border-neutral-800">
         <span>Data completeness: {result.dataCompleteness}%</span>
-        <span>
-          {result.textScores ? "AI analysis included" : "No pitch text provided"}
-        </span>
+        <span>{SOURCE_LABELS[result.dataSource] ?? "No text analysis"}</span>
       </div>
     </div>
   );

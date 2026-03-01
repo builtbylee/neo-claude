@@ -9,6 +9,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { buildProfile, scoreText, type ExtractedFacts } from "@/lib/claude/text-scorer";
 import { findCompany, getSupabaseClient, loadFeatures } from "@/lib/db/supabase";
+import { scrapeWebsite } from "@/lib/enrichment/website-scraper";
+import { scoreFromKnowledge } from "@/lib/enrichment/knowledge-enrichment";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
 import { checkGates, type GateCheckInput } from "@/lib/scoring/gates";
 import { classify } from "@/lib/scoring/recommendation";
@@ -45,6 +47,8 @@ interface QuickScoreResponse {
     reason: string;
   }>;
   matchedCompany: string | null;
+  dataSource: "user" | "website" | "ai_knowledge" | "none";
+  generatedProfile: string | null;
 }
 
 export async function POST(request: NextRequest) {
@@ -107,9 +111,14 @@ export async function POST(request: NextRequest) {
     // Model inference failed — use baseline
   }
 
-  // Step 3: Claude text scoring (if pitch text provided and API key available)
-  let textResult = null;
+  // Step 3: Resolve pitch text source and run Claude scoring
+  let textResult: Awaited<ReturnType<typeof scoreText>> = null;
+  let dataSource: "user" | "website" | "ai_knowledge" | "none" = "none";
+  let generatedProfile: string | null = null;
+
   if (body.pitchText?.trim() && anthropicKey) {
+    // Priority 1: User-provided pitch text
+    dataSource = "user";
     const profile = buildProfile({
       name: body.companyName,
       sector: body.sector,
@@ -117,11 +126,58 @@ export async function POST(request: NextRequest) {
       fundingTarget: body.fundingTarget,
       pitchText: body.pitchText,
     });
-
     try {
       textResult = await scoreText(anthropicKey, profile);
     } catch {
-      // Claude scoring failed — continue without text scores
+      // Claude scoring failed — continue
+    }
+  } else if (body.websiteUrl?.trim() && anthropicKey) {
+    // Priority 2: Website scrape
+    try {
+      const scrapeResult = await scrapeWebsite(body.websiteUrl);
+      if (scrapeResult.ok && scrapeResult.text) {
+        dataSource = "website";
+        const profile = buildProfile({
+          name: body.companyName,
+          sector: body.sector,
+          revenue: body.revenue,
+          fundingTarget: body.fundingTarget,
+          pitchText: scrapeResult.text,
+        });
+        textResult = await scoreText(anthropicKey, profile);
+      }
+    } catch {
+      // Scrape or scoring failed — fall through to knowledge
+    }
+
+    // If scrape failed, try Claude knowledge
+    if (!textResult) {
+      try {
+        const knowledgeResult = await scoreFromKnowledge(
+          anthropicKey, body.companyName, body.sector, body.revenue, body.fundingTarget,
+        );
+        if (knowledgeResult && !knowledgeResult.unknown) {
+          dataSource = "ai_knowledge";
+          textResult = knowledgeResult;
+          generatedProfile = knowledgeResult.generatedProfile;
+        }
+      } catch {
+        // All enrichment failed
+      }
+    }
+  } else if (anthropicKey) {
+    // Priority 3: Claude knowledge enrichment (no pitch text, no website)
+    try {
+      const knowledgeResult = await scoreFromKnowledge(
+        anthropicKey, body.companyName, body.sector, body.revenue, body.fundingTarget,
+      );
+      if (knowledgeResult && !knowledgeResult.unknown) {
+        dataSource = "ai_knowledge";
+        textResult = knowledgeResult;
+        generatedProfile = knowledgeResult.generatedProfile;
+      }
+    } catch {
+      // Knowledge enrichment failed
     }
   }
 
@@ -224,6 +280,8 @@ export async function POST(request: NextRequest) {
       reason: g.reason,
     })),
     matchedCompany: company?.name ?? null,
+    dataSource,
+    generatedProfile,
   };
 
   return NextResponse.json(response);

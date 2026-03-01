@@ -30,6 +30,8 @@ type ScoreResponse = {
     reason: string;
   }>;
   matchedCompany: string | null;
+  dataSource: "user" | "website" | "ai_knowledge" | "none";
+  generatedProfile: string | null;
 };
 
 export default function Home() {
