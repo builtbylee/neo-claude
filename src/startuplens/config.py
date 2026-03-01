@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     companies_house_api_key: str = ""
     github_token: str = ""
     sec_user_agent: str = "StartupLens research@example.com"
+    anthropic_api_key: str = ""
 
     model_config = {"env_file": ".env", "env_prefix": "SL_"}
 

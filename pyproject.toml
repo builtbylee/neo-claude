@@ -23,6 +23,9 @@ dependencies = [
     "scikit-learn>=1.4",
     "shap>=0.45",
 
+    # LLM
+    "anthropic>=0.40",
+
     # Settings
     "pydantic-settings>=2.2",
 
