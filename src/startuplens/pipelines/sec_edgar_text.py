@@ -483,6 +483,150 @@ def _store_text(
 
 
 # ---------------------------------------------------------------------------
+# Profile generation from structured DB data
+# ---------------------------------------------------------------------------
+
+
+def generate_profiles_from_db(
+    conn: psycopg.Connection,
+    *,
+    limit: int | None = None,
+) -> int:
+    """Generate company profile texts from structured DB data.
+
+    Constructs informative text profiles from financial_data,
+    crowdfunding_outcomes, and company metadata. Stores in sec_form_c_texts
+    as a substitute for scraped narrative text when EDGAR is rate-limited.
+
+    Returns the number of profiles generated.
+    """
+    from startuplens.db import execute_query
+
+    query = """
+        SELECT
+            c.id AS company_id,
+            c.name AS company_name,
+            c.sector,
+            SPLIT_PART(c.source_id, '_q', 1) AS cik,
+            co.campaign_date,
+            co.funding_target,
+            co.amount_raised,
+            co.overfunding_ratio,
+            co.investor_count,
+            co.had_revenue,
+            co.revenue_at_raise,
+            co.revenue_model,
+            co.founder_count,
+            co.company_age_at_raise_months,
+            co.stage_bucket,
+            co.platform,
+            fd.revenue,
+            fd.revenue_growth_yoy,
+            fd.net_income,
+            fd.total_assets,
+            fd.total_liabilities,
+            fd.employee_count,
+            fd.period_end_date
+        FROM companies c
+        JOIN crowdfunding_outcomes co ON co.company_id = c.id
+        LEFT JOIN LATERAL (
+            SELECT revenue, revenue_growth_yoy, net_income, total_assets,
+                   total_liabilities, employee_count, period_end_date
+            FROM financial_data
+            WHERE company_id = c.id
+            ORDER BY period_end_date DESC
+            LIMIT 1
+        ) fd ON true
+        LEFT JOIN sec_form_c_texts t ON t.company_id = c.id
+        WHERE c.source IN ('sec_dera_cf', 'sec_edgar')
+          AND co.outcome IN ('trading', 'exited', 'failed')
+          AND co.label_quality_tier <= 2
+          AND t.id IS NULL
+        ORDER BY c.id
+    """
+    if limit:
+        query += f"\n        LIMIT {int(limit)}"
+
+    rows = execute_query(conn, query)
+    logger.info("profile_generation_targets", count=len(rows))
+
+    if not rows:
+        return 0
+
+    generated = 0
+    for row in rows:
+        profile = _build_profile_text(row)
+        if len(profile) >= _MIN_TEXT_LENGTH:
+            _store_text(
+                conn,
+                row["company_id"],
+                row["cik"],
+                "PROFILE-GENERATED",
+                row.get("campaign_date") or row.get("period_end_date"),
+                profile,
+            )
+            generated += 1
+
+    logger.info("profiles_generated", count=generated)
+    return generated
+
+
+def _build_profile_text(row: dict[str, Any]) -> str:
+    """Build a structured profile text from a company's DB data."""
+    parts = [f"Company: {row['company_name']}"]
+
+    if row.get("sector"):
+        parts.append(f"Sector: {row['sector']}")
+    if row.get("platform"):
+        parts.append(f"Platform: {row['platform']}")
+    if row.get("stage_bucket"):
+        parts.append(f"Stage: {row['stage_bucket']}")
+    if row.get("campaign_date"):
+        parts.append(f"Campaign date: {row['campaign_date']}")
+
+    if row.get("company_age_at_raise_months") is not None:
+        parts.append(
+            f"Company age at raise: {row['company_age_at_raise_months']} months"
+        )
+    if row.get("founder_count") is not None:
+        parts.append(f"Founder count: {row['founder_count']}")
+
+    if row.get("funding_target") is not None:
+        parts.append(f"Funding target: ${row['funding_target']:,.0f}")
+    if row.get("amount_raised") is not None:
+        parts.append(f"Amount raised: ${row['amount_raised']:,.0f}")
+    if row.get("overfunding_ratio") is not None:
+        parts.append(f"Overfunding ratio: {row['overfunding_ratio']:.2f}x")
+    if row.get("investor_count") is not None:
+        parts.append(f"Investor count: {row['investor_count']}")
+
+    had_rev = row.get("had_revenue")
+    if had_rev is not None:
+        parts.append(f"Had revenue at raise: {'Yes' if had_rev else 'No'}")
+    if row.get("revenue_at_raise") is not None:
+        parts.append(f"Revenue at raise: ${row['revenue_at_raise']:,.0f}")
+    if row.get("revenue_model"):
+        parts.append(f"Revenue model: {row['revenue_model']}")
+
+    if row.get("revenue") is not None:
+        parts.append(f"Revenue (most recent FY): ${row['revenue']:,.0f}")
+    if row.get("revenue_growth_yoy") is not None:
+        parts.append(
+            f"Revenue growth (YoY): {row['revenue_growth_yoy']:.1%}"
+        )
+    if row.get("net_income") is not None:
+        parts.append(f"Net income: ${row['net_income']:,.0f}")
+    if row.get("total_assets") is not None:
+        parts.append(f"Total assets: ${row['total_assets']:,.0f}")
+    if row.get("total_liabilities") is not None:
+        parts.append(f"Total liabilities: ${row['total_liabilities']:,.0f}")
+    if row.get("employee_count") is not None:
+        parts.append(f"Employees: {row['employee_count']}")
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -496,5 +640,16 @@ def run_text_scraper(*, limit: int | None = None) -> int:
     conn = get_connection(settings)
     try:
         return scrape_form_c_texts(conn, settings, limit=limit)
+    finally:
+        conn.close()
+
+
+def run_profile_generator(*, limit: int | None = None) -> int:
+    """Generate profiles from DB data. Returns count generated."""
+    from startuplens.db import get_connection
+
+    conn = get_connection()
+    try:
+        return generate_profiles_from_db(conn, limit=limit)
     finally:
         conn.close()

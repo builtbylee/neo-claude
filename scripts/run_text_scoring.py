@@ -30,6 +30,17 @@ def scrape(
 
 
 @app.command()
+def generate(
+    limit: int | None = typer.Option(None, help="Max profiles to generate"),
+) -> None:
+    """Generate company profiles from structured DB data (replaces scrape)."""
+    from startuplens.pipelines.sec_edgar_text import run_profile_generator
+
+    count = run_profile_generator(limit=limit)
+    typer.echo(f"Generated {count} company profiles.")
+
+
+@app.command()
 def score(
     limit: int | None = typer.Option(None, help="Max texts to score"),
 ) -> None:
@@ -71,9 +82,9 @@ def auc() -> None:
 def run_all(
     limit: int | None = typer.Option(None, help="Max companies per stage"),
 ) -> None:
-    """Run scrape → score → auc end-to-end."""
-    typer.echo("=== Stage 1: Scraping EDGAR texts ===")
-    scrape(limit=limit)
+    """Run generate → score → auc end-to-end."""
+    typer.echo("=== Stage 1: Generating profiles ===")
+    generate(limit=limit)
 
     typer.echo("\n=== Stage 2: Scoring with Claude ===")
     score(limit=limit)

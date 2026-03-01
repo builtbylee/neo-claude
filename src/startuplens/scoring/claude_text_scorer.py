@@ -1,19 +1,20 @@
-"""Claude-based text quality scoring for Form C filings.
+"""Claude-based investment quality scoring for Form C companies.
 
-Scores 7 dimensions of text quality (0-100 each) plus an aggregate
-text_quality_score. Uses Claude Sonnet with structured JSON output.
-Results stored in claude_text_scores table.
+Scores 7 dimensions of quality (0-100 each) plus an aggregate
+text_quality_score. Uses Claude Haiku with batched scoring (10 companies
+per API call) for efficiency. Results stored in claude_text_scores table.
 
-Dimension definitions per ARCHITECTURE.md:
+Dimension definitions:
   clarity, claims_plausibility, problem_specificity, differentiation_depth,
   founder_domain_signal, risk_honesty, business_model_clarity
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-import time
+import re
 from typing import TYPE_CHECKING, Any
 
 import anthropic
@@ -31,60 +32,42 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are evaluating the quality and credibility of a startup's offering text \
-from an SEC Form C filing. Score each dimension 0-100 based on the text provided.
+You are evaluating the investment quality of startups based on structured \
+financial profiles from SEC Reg CF filings. Score each dimension 0-100.
 
 Calibration guidance:
-- Most offerings score 40-60 on each dimension.
-- Scores above 75 indicate genuinely exceptional quality for that dimension.
-- Scores below 30 indicate serious concerns.
-- Be skeptical: crowdfunding offerings have an 8.5x higher failure rate \
-than matched non-crowdfunding companies.
+- Most crowdfunding companies score 30-50 on each dimension.
+- Scores above 70 indicate genuinely strong indicators.
+- Scores below 20 indicate serious concerns or missing data.
+- ~85% of equity crowdfunding companies fail. Be calibrated accordingly.
 
 Return ONLY valid JSON with no additional text or markdown formatting."""
 
-_USER_TEMPLATE = """\
-OFFERING TEXT:
-{narrative_text}
+_BATCH_TEMPLATE = """\
+Score each company below on 7 dimensions (0-100 each) plus an aggregate \
+text_quality_score (0-100). Dimensions:
+1. CLARITY: Business model focus (name, sector, financials)
+2. CLAIMS_PLAUSIBILITY: Financial trajectory plausibility
+3. PROBLEM_SPECIFICITY: Evidence of real market need
+4. DIFFERENTIATION_DEPTH: Competitive moat signals
+5. FOUNDER_DOMAIN_SIGNAL: Execution capability indicators
+6. RISK_HONESTY: Financial risk severity (inverse: lower = more risky)
+7. BUSINESS_MODEL_CLARITY: Revenue pattern coherence
 
-COMPANY CONTEXT:
-{context_json}
+{profiles}
 
-Score these dimensions (0-100 each):
-1. CLARITY: Is the value proposition clear and specific? Or vague and buzzword-heavy?
-2. CLAIMS_PLAUSIBILITY: Are market size claims, growth projections, and competitive \
-claims believable? Or inflated and unsupported?
-3. PROBLEM_SPECIFICITY: Is the problem well-defined with evidence of real customer \
-pain? Or generic and assumed?
-4. DIFFERENTIATION_DEPTH: Is the competitive advantage specific, defensible, and \
-hard to replicate? Or superficial?
-5. FOUNDER_DOMAIN_SIGNAL: Does the language demonstrate deep domain expertise? \
-Or generic business-speak?
-6. RISK_HONESTY: Does the text acknowledge real risks and challenges? \
-Or is it unrealistically optimistic?
-7. BUSINESS_MODEL_CLARITY: Is how the company makes money clear and logical? \
-Or vague?
-
-Return JSON:
-{{
-  "clarity": <int 0-100>,
-  "claims_plausibility": <int 0-100>,
-  "problem_specificity": <int 0-100>,
-  "differentiation_depth": <int 0-100>,
-  "founder_domain_signal": <int 0-100>,
-  "risk_honesty": <int 0-100>,
-  "business_model_clarity": <int 0-100>,
-  "text_quality_score": <int 0-100>,
-  "red_flags": [<string>, ...],
-  "reasoning": "<2-3 sentences>"
-}}"""
+Return a JSON array with one object per company, in order:
+[{{"company": "<name>", "clarity": N, "claims_plausibility": N, \
+"problem_specificity": N, "differentiation_depth": N, \
+"founder_domain_signal": N, "risk_honesty": N, \
+"business_model_clarity": N, "text_quality_score": N}}]"""
 
 # Version hash of the prompt templates for tracking drift
 PROMPT_VERSION = hashlib.sha256(
-    (_SYSTEM_PROMPT + _USER_TEMPLATE).encode()
+    (_SYSTEM_PROMPT + _BATCH_TEMPLATE).encode()
 ).hexdigest()[:12]
 
-MODEL_ID = "claude-sonnet-4-5-20250514"
+MODEL_ID = "claude-haiku-4-5-20251001"
 
 _SCORE_DIMENSIONS = (
     "clarity",
@@ -97,84 +80,7 @@ _SCORE_DIMENSIONS = (
     "text_quality_score",
 )
 
-# Max text to send to Claude (tokens are roughly 4 chars)
-_MAX_TEXT_CHARS = 30_000
-
-
-# ---------------------------------------------------------------------------
-# Prompt construction
-# ---------------------------------------------------------------------------
-
-
-def build_scoring_prompt(
-    narrative_text: str,
-    context: dict[str, Any] | None = None,
-) -> list[dict[str, str]]:
-    """Build the Claude messages list for text scoring."""
-    # Truncate very long texts
-    text = narrative_text[:_MAX_TEXT_CHARS]
-    if len(narrative_text) > _MAX_TEXT_CHARS:
-        text += "\n\n[Text truncated for length]"
-
-    context_json = json.dumps(context or {}, indent=2, default=str)
-
-    return [
-        {"role": "user", "content": _USER_TEMPLATE.format(
-            narrative_text=text,
-            context_json=context_json,
-        )},
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
-
-
-def score_text(
-    client: anthropic.Anthropic,
-    narrative_text: str,
-    context: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Score a single piece of text using Claude. Returns parsed scores or None."""
-    messages = build_scoring_prompt(narrative_text, context)
-
-    try:
-        response = client.messages.create(
-            model=MODEL_ID,
-            max_tokens=1024,
-            system=_SYSTEM_PROMPT,
-            messages=messages,
-        )
-    except anthropic.APIError as exc:
-        logger.error("claude_api_error", error=str(exc))
-        return None
-
-    # Extract JSON from response
-    raw_text = response.content[0].text.strip()
-
-    # Strip markdown code fences if present
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("\n", 1)[-1]
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3].strip()
-
-    try:
-        scores = json.loads(raw_text)
-    except json.JSONDecodeError:
-        logger.error("claude_json_parse_error", raw=raw_text[:500])
-        return None
-
-    # Validate all dimension scores are present and in range
-    for dim in _SCORE_DIMENSIONS:
-        val = scores.get(dim)
-        if not isinstance(val, int | float) or not (0 <= val <= 100):
-            logger.error("claude_invalid_score", dimension=dim, value=val)
-            return None
-        scores[dim] = int(val)
-
-    scores["_raw_response"] = raw_text
-    return scores
+BATCH_SIZE = 10
 
 
 # ---------------------------------------------------------------------------
@@ -192,25 +98,17 @@ def _get_texts_to_score(
     from startuplens.db import execute_query
 
     query = """
-        SELECT
+        SELECT DISTINCT ON (t.company_id)
             t.id AS form_c_text_id,
             t.company_id,
             t.narrative_text,
-            c.name AS company_name,
-            c.sector,
-            co.amount_raised,
-            co.funding_target,
-            co.had_revenue,
-            co.revenue_at_raise,
-            co.founder_count,
-            co.company_age_at_raise_months
+            c.name AS company_name
         FROM sec_form_c_texts t
         JOIN companies c ON c.id = t.company_id
-        LEFT JOIN crowdfunding_outcomes co ON co.company_id = c.id
         LEFT JOIN claude_text_scores s
             ON s.company_id = t.company_id AND s.prompt_version = %s
         WHERE s.id IS NULL
-        ORDER BY t.created_at ASC
+        ORDER BY t.company_id, t.created_at ASC
     """
     if limit:
         query += f"\n        LIMIT {int(limit)}"
@@ -223,10 +121,18 @@ def score_batch(
     settings: Settings,
     *,
     limit: int | None = None,
+    max_concurrent: int = 5,
 ) -> int:
-    """Score unscored texts using Claude. Returns count of texts scored."""
+    """Score unscored texts using Claude with batched async calls.
+
+    Groups companies into batches of BATCH_SIZE and sends concurrent
+    API calls with a semaphore to respect rate limits.
+    """
     if not settings.anthropic_api_key:
-        logger.error("no_anthropic_api_key", hint="Set SL_ANTHROPIC_API_KEY in .env")
+        logger.error(
+            "no_anthropic_api_key",
+            hint="Set SL_ANTHROPIC_API_KEY in .env",
+        )
         return 0
 
     texts = _get_texts_to_score(conn, PROMPT_VERSION, limit=limit)
@@ -235,44 +141,141 @@ def score_batch(
     if not texts:
         return 0
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    # Group into batches
+    batches = [
+        texts[i : i + BATCH_SIZE]
+        for i in range(0, len(texts), BATCH_SIZE)
+    ]
+    logger.info(
+        "batch_plan",
+        total_companies=len(texts),
+        batches=len(batches),
+        concurrent=max_concurrent,
+    )
+
+    scored = asyncio.run(
+        _score_batches_async(conn, settings, batches, max_concurrent)
+    )
+    return scored
+
+
+async def _score_batches_async(
+    conn: psycopg.Connection,
+    settings: Settings,
+    batches: list[list[dict[str, Any]]],
+    max_concurrent: int,
+) -> int:
+    """Score company batches concurrently using AsyncAnthropic."""
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key,
+        max_retries=5,
+    )
+    sem = asyncio.Semaphore(max_concurrent)
     scored = 0
+    failed = 0
+    total_batches = len(batches)
 
-    for i, row in enumerate(texts):
-        company_name = row["company_name"]
-        logger.info(
-            "scoring_text",
-            company=company_name,
-            progress=f"{i + 1}/{len(texts)}",
-        )
+    async def _score_batch(
+        batch: list[dict[str, Any]], batch_idx: int,
+    ) -> int:
+        async with sem:
+            # Build profiles section
+            profiles = []
+            for i, row in enumerate(batch, 1):
+                profiles.append(f"--- COMPANY {i} ---")
+                profiles.append(row["narrative_text"])
+            profiles_text = "\n\n".join(profiles)
 
-        # Build context from structured data
-        context = {
-            "company_name": company_name,
-            "sector": row.get("sector"),
-            "funding_target": row.get("funding_target"),
-            "amount_raised": row.get("amount_raised"),
-            "had_revenue": row.get("had_revenue"),
-            "revenue_at_raise": row.get("revenue_at_raise"),
-            "founder_count": row.get("founder_count"),
-            "company_age_months": row.get("company_age_at_raise_months"),
-        }
+            prompt = _BATCH_TEMPLATE.format(profiles=profiles_text)
 
-        scores = score_text(client, row["narrative_text"], context)
+            try:
+                response = await client.messages.create(
+                    model=MODEL_ID,
+                    max_tokens=2048,
+                    system=_SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+            except anthropic.APIError as exc:
+                logger.warning(
+                    "batch_api_error",
+                    batch=batch_idx,
+                    error=str(exc)[:100],
+                )
+                return 0
 
-        if scores:
-            _store_scores(conn, row["company_id"], row["form_c_text_id"], scores)
-            scored += 1
-            logger.info(
-                "text_scored",
-                company=company_name,
-                quality=scores["text_quality_score"],
-            )
+            raw_text = response.content[0].text.strip()
+            # Strip markdown fences
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("\n", 1)[-1]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text[:-3].strip()
 
-        # Brief pause between API calls
-        time.sleep(0.5)
+            # Find JSON array in response
+            match = re.search(r"\[.*\]", raw_text, re.DOTALL)
+            if not match:
+                logger.warning(
+                    "no_json_array", batch=batch_idx,
+                    raw=raw_text[:200],
+                )
+                return 0
 
-    logger.info("scoring_complete", scored=scored, total=len(texts))
+            try:
+                results = json.loads(match.group())
+            except json.JSONDecodeError:
+                logger.warning("json_parse_error", batch=batch_idx)
+                return 0
+
+            batch_scored = 0
+            for row, scores in zip(batch, results):
+                valid = True
+                for dim in _SCORE_DIMENSIONS:
+                    val = scores.get(dim)
+                    if not isinstance(val, int | float):
+                        valid = False
+                        break
+                    val = int(val)
+                    if not (0 <= val <= 100):
+                        valid = False
+                        break
+                    scores[dim] = val
+
+                if not valid:
+                    continue
+
+                _store_scores(
+                    conn,
+                    row["company_id"],
+                    row["form_c_text_id"],
+                    scores,
+                )
+                batch_scored += 1
+
+            if (batch_idx + 1) % 50 == 0:
+                logger.info(
+                    "scoring_progress",
+                    batch=batch_idx + 1,
+                    total_batches=total_batches,
+                )
+            return batch_scored
+
+    tasks = [
+        _score_batch(batch, i)
+        for i, batch in enumerate(batches)
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for r in results:
+        if isinstance(r, int):
+            scored += r
+        else:
+            failed += 1
+
+    logger.info(
+        "scoring_complete",
+        scored=scored,
+        failed_batches=failed,
+        total_batches=total_batches,
+    )
     return scored
 
 
@@ -283,8 +286,6 @@ def _store_scores(
     scores: dict[str, Any],
 ) -> None:
     """Insert Claude text scores into the database."""
-    raw_response = scores.pop("_raw_response", None)
-
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -293,11 +294,11 @@ def _store_scores(
                 clarity, claims_plausibility, problem_specificity,
                 differentiation_depth, founder_domain_signal,
                 risk_honesty, business_model_clarity, text_quality_score,
-                red_flags, reasoning, prompt_version, model_id, raw_response
+                red_flags, reasoning, prompt_version, model_id
             ) VALUES (
                 %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s
             )
             ON CONFLICT (company_id, prompt_version) DO NOTHING
             """,
@@ -316,7 +317,6 @@ def _store_scores(
                 scores.get("reasoning"),
                 PROMPT_VERSION,
                 MODEL_ID,
-                json.dumps(raw_response) if raw_response else None,
             ),
         )
     conn.commit()

@@ -30,6 +30,7 @@ from startuplens.backtest.simulator import (
 from startuplens.backtest.splitter import generate_walk_forward_windows
 from startuplens.config import get_settings
 from startuplens.db import execute_query, get_connection
+from startuplens.backtest.text_score_auc import compute_claude_text_auc
 from startuplens.model.progress_labels import load_progress_labels
 from startuplens.model.train import score_deals, train_model, train_progress_model
 
@@ -381,12 +382,15 @@ def main(
             if quality_windows else math.nan
         )
 
+        # Compute Claude text score AUC from stored scores
+        claude_auc = compute_claude_text_auc(conn)
+
         metrics = evaluate_backtest(
             survival_auc=avg_model_auc,
             calibration_ece=avg_model_ece,
             portfolio_quality_vs_random=avg_quality_vs_random,
             portfolio_failure_rate_vs_random=avg_model_fail_vs_random,
-            claude_text_score_auc=math.nan,  # Phase 4+: requires Claude scoring
+            claude_text_score_auc=claude_auc if claude_auc > 0 else math.nan,
             progress_auc=(
                 sum(all_progress_aucs) / len(all_progress_aucs)
                 if all_progress_aucs else math.nan
