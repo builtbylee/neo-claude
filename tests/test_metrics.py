@@ -59,7 +59,7 @@ class TestThresholds:
         defaults = dict(
             survival_auc=0.70,
             calibration_ece=0.05,
-            portfolio_moic_vs_random=1.5,
+            portfolio_quality_vs_random=1.5,
             portfolio_failure_rate_vs_random=0.5,
             claude_text_score_auc=0.65,
             progress_auc=0.60,
@@ -91,15 +91,15 @@ class TestThresholds:
         ece = next(r for r in results if r.name == "Calibration ECE")
         assert ece.passed
 
-    def test_portfolio_moic_boundary_fail(self):
-        results = evaluate_backtest(**self._base_kwargs(portfolio_moic_vs_random=1.3))
-        moic = next(r for r in results if r.name == "Portfolio MOIC vs random")
+    def test_portfolio_quality_boundary_fail(self):
+        results = evaluate_backtest(**self._base_kwargs(portfolio_quality_vs_random=1.3))
+        moic = next(r for r in results if r.name == "Portfolio quality vs random")
         assert not moic.passed
         assert moic.must_pass is True
 
-    def test_portfolio_moic_boundary_pass(self):
-        results = evaluate_backtest(**self._base_kwargs(portfolio_moic_vs_random=1.31))
-        moic = next(r for r in results if r.name == "Portfolio MOIC vs random")
+    def test_portfolio_quality_boundary_pass(self):
+        results = evaluate_backtest(**self._base_kwargs(portfolio_quality_vs_random=1.31))
+        moic = next(r for r in results if r.name == "Portfolio quality vs random")
         assert moic.passed
 
     def test_failure_rate_boundary_fail(self):
@@ -170,7 +170,7 @@ class TestAllMustPassMet:
         results = evaluate_backtest(
             survival_auc=0.70,
             calibration_ece=0.05,
-            portfolio_moic_vs_random=1.5,
+            portfolio_quality_vs_random=1.5,
             portfolio_failure_rate_vs_random=0.5,
             claude_text_score_auc=0.65,
         )
@@ -180,7 +180,7 @@ class TestAllMustPassMet:
         results = evaluate_backtest(
             survival_auc=0.50,  # fails
             calibration_ece=0.05,
-            portfolio_moic_vs_random=1.5,
+            portfolio_quality_vs_random=1.5,
             portfolio_failure_rate_vs_random=0.5,
             claude_text_score_auc=0.65,
         )
@@ -190,7 +190,7 @@ class TestAllMustPassMet:
         results = evaluate_backtest(
             survival_auc=0.70,
             calibration_ece=0.05,
-            portfolio_moic_vs_random=1.5,
+            portfolio_quality_vs_random=1.5,
             portfolio_failure_rate_vs_random=0.5,
             claude_text_score_auc=0.65,
             progress_auc=0.40,                  # advisory — fails
@@ -203,7 +203,7 @@ class TestAllMustPassMet:
         results = evaluate_backtest(
             survival_auc=0.70,
             calibration_ece=0.05,
-            portfolio_moic_vs_random=1.5,
+            portfolio_quality_vs_random=1.5,
             portfolio_failure_rate_vs_random=0.5,
             claude_text_score_auc=0.65,
             progress_auc=0.60,

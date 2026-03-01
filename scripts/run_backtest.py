@@ -22,11 +22,16 @@ from startuplens.backtest.baselines import (
 )
 from startuplens.backtest.metrics import all_must_pass_met, evaluate_backtest
 from startuplens.backtest.provenance import log_backtest_run
-from startuplens.backtest.simulator import InvestorPolicy, simulate_portfolio
+from startuplens.backtest.simulator import (
+    InvestorPolicy,
+    compute_portfolio_quality,
+    simulate_portfolio,
+)
 from startuplens.backtest.splitter import generate_walk_forward_windows
 from startuplens.config import get_settings
 from startuplens.db import execute_query, get_connection
-from startuplens.model.train import score_deals, train_model
+from startuplens.model.progress_labels import load_progress_labels
+from startuplens.model.train import score_deals, train_model, train_progress_model
 
 logger = structlog.get_logger(__name__)
 app = typer.Typer()
@@ -35,6 +40,7 @@ app = typer.Typer()
 _FEATURE_QUERY = """
     SELECT DISTINCT ON (tfw.entity_id, tfw.as_of_date)
         tfw.entity_id::text,
+        c.id::text AS company_id,
         tfw.as_of_date::text AS campaign_date,
         tfw.sector,
         tfw.platform,
@@ -54,11 +60,19 @@ _FEATURE_QUERY = """
         COALESCE(tfw.revenue_at_raise > 0, false) AS has_revenue,
         COALESCE(tfw.qualified_institutional, false) AS has_institutional_coinvestor,
         COALESCE(tfw.eis_seis_eligible, false) AS eis_eligible,
-        COALESCE(co.outcome, 'unknown') AS outcome
+        COALESCE(co.outcome, 'unknown') AS outcome,
+        fd.revenue_growth_yoy
     FROM training_features_wide tfw
     LEFT JOIN companies c ON c.entity_id = tfw.entity_id
     LEFT JOIN crowdfunding_outcomes co
         ON co.company_id = c.id AND co.label_quality_tier <= 2
+    LEFT JOIN LATERAL (
+        SELECT revenue_growth_yoy
+        FROM financial_data
+        WHERE company_id = c.id AND revenue_growth_yoy IS NOT NULL
+        ORDER BY period_end_date DESC
+        LIMIT 1
+    ) fd ON true
     WHERE tfw.as_of_date BETWEEN %s AND %s
     ORDER BY tfw.entity_id, tfw.as_of_date, co.campaign_date DESC NULLS LAST
 """
@@ -82,9 +96,57 @@ def _rows_to_scored_deals(rows: list[dict], scores: list[float] | None = None) -
             has_institutional_coinvestor=bool(r.get("has_institutional_coinvestor")),
             eis_eligible=bool(r.get("eis_eligible")),
             outcome=r.get("outcome", "unknown"),
+            revenue_growth=r.get("revenue_growth_yoy"),
         )
         for i, r in enumerate(rows)
     ]
+
+
+_GROWTH_FEATURE_QUERY = """
+    SELECT DISTINCT ON (fd_r.company_id)
+        fd_r.company_id::text,
+        CASE WHEN fd_p.revenue IS NOT NULL AND fd_p.revenue > 0
+             THEN (fd_r.revenue - fd_p.revenue) / fd_p.revenue
+             ELSE NULL END AS revenue_growth_yoy,
+        CASE WHEN fd_p.total_assets IS NOT NULL AND fd_p.total_assets > 0
+             THEN (fd_r.total_assets - fd_p.total_assets) / fd_p.total_assets
+             ELSE NULL END AS asset_growth_yoy,
+        CASE WHEN fd_p.cash_and_equivalents IS NOT NULL
+                  AND fd_p.cash_and_equivalents > 0
+             THEN (fd_r.cash_and_equivalents - fd_p.cash_and_equivalents)
+                  / fd_p.cash_and_equivalents
+             ELSE NULL END AS cash_growth_yoy,
+        CASE WHEN fd_p.net_income IS NOT NULL
+             THEN fd_r.net_income - fd_p.net_income
+             ELSE NULL END AS net_income_improvement
+    FROM financial_data fd_r
+    JOIN financial_data fd_p
+        ON fd_p.company_id = fd_r.company_id
+        AND fd_p.period_type = 'prior_annual'
+        AND fd_p.period_end_date = fd_r.period_end_date
+    WHERE fd_r.period_type = 'annual'
+      AND fd_r.company_id = ANY(%s::uuid[])
+    ORDER BY fd_r.company_id, fd_r.period_end_date DESC
+"""
+
+
+def _enrich_growth_features(conn, rows: list[dict]) -> None:
+    """Add YoY growth features to row dicts from financial_data prior/current pairs."""
+    company_ids = [r["company_id"] for r in rows if r.get("company_id")]
+    if not company_ids:
+        return
+
+    growth_rows = execute_query(conn, _GROWTH_FEATURE_QUERY, (company_ids,))
+    growth_by_id = {r["company_id"]: r for r in growth_rows}
+
+    for row in rows:
+        cid = row.get("company_id")
+        if cid and cid in growth_by_id:
+            g = growth_by_id[cid]
+            row["revenue_growth_yoy"] = g.get("revenue_growth_yoy")
+            row["asset_growth_yoy"] = g.get("asset_growth_yoy")
+            row["cash_growth_yoy"] = g.get("cash_growth_yoy")
+            row["net_income_improvement"] = g.get("net_income_improvement")
 
 
 @app.command()
@@ -109,6 +171,7 @@ def main(
         window_results: list[dict] = []
         all_model_aucs: list[float] = []
         all_model_eces: list[float] = []
+        all_progress_aucs: list[float] = []
 
         for window in windows:
             # Load train and test data as full feature rows
@@ -164,6 +227,38 @@ def main(
                     test_labeled=len(test_labeled),
                 )
 
+            # --- Progress model ---
+            _enrich_growth_features(conn, train_rows)
+            _enrich_growth_features(conn, test_rows)
+
+            train_progress = load_progress_labels(
+                conn,
+                window.train_start.isoformat(),
+                window.train_end.isoformat(),
+            )
+            test_progress = load_progress_labels(
+                conn,
+                window.test_start.isoformat(),
+                window.test_end.isoformat(),
+            )
+
+            progress_trained = train_progress_model(
+                train_rows, test_rows, train_progress, test_progress,
+            )
+            if progress_trained is not None:
+                all_progress_aucs.append(progress_trained.auc)
+                logger.info(
+                    "progress_model_trained",
+                    window=window.label,
+                    auc=f"{progress_trained.auc:.3f}",
+                    n_train=progress_trained.n_train,
+                    n_test=progress_trained.n_test,
+                    top_features=sorted(
+                        progress_trained.feature_importances.items(),
+                        key=lambda x: x[1], reverse=True,
+                    )[:5],
+                )
+
             # Baselines (use ScoredDeal objects)
             deals = _rows_to_scored_deals(test_rows)
             random_scored = random_baseline(deals)
@@ -183,6 +278,16 @@ def main(
             model_fail_vs_random = (
                 model_pf.failure_rate / random_fail
                 if model_pf else math.nan
+            )
+
+            # Portfolio quality scores (revenue-growth-weighted outcomes)
+            random_quality = compute_portfolio_quality(random_pf)
+            model_quality = (
+                compute_portfolio_quality(model_pf) if model_pf else math.nan
+            )
+            quality_vs_random = (
+                model_quality / random_quality
+                if model_pf and random_quality > 0 else math.nan
             )
 
             # Model uncertainty: fraction of scores in uncertain band (40-60)
@@ -212,6 +317,9 @@ def main(
                 "model_fail_vs_random": model_fail_vs_random,
                 "model_uncertainty_rate": uncertainty_rate,
                 "top_k_sector_concentration": top_k_sector,
+                "model_quality": model_quality,
+                "random_quality": random_quality,
+                "quality_vs_random": quality_vs_random,
             }
 
             window_results.append(result)
@@ -263,14 +371,26 @@ def main(
             / len(sector_windows)
             if sector_windows else math.nan
         )
+        quality_windows = [
+            w for w in model_windows
+            if not math.isnan(w.get("quality_vs_random", math.nan))
+        ]
+        avg_quality_vs_random = (
+            sum(w["quality_vs_random"] for w in quality_windows)
+            / len(quality_windows)
+            if quality_windows else math.nan
+        )
 
         metrics = evaluate_backtest(
             survival_auc=avg_model_auc,
             calibration_ece=avg_model_ece,
-            portfolio_moic_vs_random=math.nan,  # No returns data yet
+            portfolio_quality_vs_random=avg_quality_vs_random,
             portfolio_failure_rate_vs_random=avg_model_fail_vs_random,
             claude_text_score_auc=math.nan,  # Phase 4+: requires Claude scoring
-            progress_auc=math.nan,  # Phase 4+: requires progress model
+            progress_auc=(
+                sum(all_progress_aucs) / len(all_progress_aucs)
+                if all_progress_aucs else math.nan
+            ),
             model_uncertainty_rate=avg_uncertainty,
             top_k_sector_concentration=avg_top_k_sector,
         )

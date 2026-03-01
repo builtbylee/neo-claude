@@ -157,3 +157,39 @@ def simulate_walk_forward(
         portfolio = simulate_portfolio(test_deals, policy)
         portfolios.append(portfolio)
     return portfolios
+
+
+# ---------------------------------------------------------------------------
+# Portfolio quality scoring
+# ---------------------------------------------------------------------------
+
+def deal_quality_score(deal: ScoredDeal) -> float:
+    """Compute a quality score for a single deal based on outcome and revenue growth.
+
+    Scoring:
+        - failed → 0.0
+        - trading/exited, no growth data → 1.0
+        - trading/exited, revenue declining → 0.5
+        - trading/exited, revenue flat (|growth| < 10%) → 1.0
+        - trading/exited, revenue growing → 1.0 + min(growth, 2.0)  (capped at 3.0)
+    """
+    if deal.outcome == "failed":
+        return 0.0
+
+    if deal.revenue_growth is None:
+        return 1.0
+
+    g = float(deal.revenue_growth)
+    if g < -0.1:
+        return 0.5
+    if g <= 0.1:
+        return 1.0
+    return 1.0 + min(g, 2.0)
+
+
+def compute_portfolio_quality(portfolio: SimulatedPortfolio) -> float:
+    """Compute average quality score for a simulated portfolio's selected deals."""
+    if not portfolio.selected_deals:
+        return 0.0
+    scores = [deal_quality_score(d) for d in portfolio.selected_deals]
+    return sum(scores) / len(scores)

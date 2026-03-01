@@ -38,6 +38,15 @@ FEATURE_COLUMNS = [
 # Categorical features encoded as strings → need ordinal encoding
 CATEGORICAL_FEATURES = ["instrument_type", "platform", "country"]
 
+# Progress model uses base features + YoY growth features from prior/current FY.
+PROGRESS_FEATURE_COLUMNS = FEATURE_COLUMNS + [
+    "revenue_growth_yoy",
+    "asset_growth_yoy",
+    "cash_growth_yoy",
+    "net_income_improvement",
+]
+PROGRESS_CATEGORICAL_FEATURES = CATEGORICAL_FEATURES
+
 
 @dataclass
 class TrainedModel:
@@ -174,6 +183,88 @@ def score_deals(
     # Invert: high score = low failure probability = good deal
     scores = [(1.0 - p) * 100.0 for p in p_fail]
     return scores
+
+
+def train_progress_model(
+    train_rows: list[dict],
+    test_rows: list[dict],
+    train_labels: dict[str, int],
+    test_labels: dict[str, int],
+    *,
+    calibrate: bool = True,
+) -> TrainedModel | None:
+    """Train a progress model predicting 18-24 month milestone achievement.
+
+    Same architecture as the survival model but with a different target
+    (progress label) and additional growth features.
+
+    Args:
+        train_rows: Training data rows with feature columns.
+        test_rows: Test data rows.
+        train_labels: Dict mapping company_id -> progress_label (0 or 1).
+        test_labels: Dict mapping company_id -> progress_label (0 or 1).
+        calibrate: Whether to apply isotonic calibration.
+
+    Returns:
+        TrainedModel with progress AUC, or None if insufficient data.
+    """
+    all_features = PROGRESS_FEATURE_COLUMNS + PROGRESS_CATEGORICAL_FEATURES
+
+    # Filter to rows that have a progress label
+    train_labeled = [r for r in train_rows if r.get("company_id") in train_labels]
+    test_labeled = [r for r in test_rows if r.get("company_id") in test_labels]
+
+    if len(train_labeled) < 30 or len(test_labeled) < 10:
+        return None
+
+    X_train = _build_feature_matrix(  # noqa: N806
+        train_labeled, PROGRESS_FEATURE_COLUMNS, PROGRESS_CATEGORICAL_FEATURES,
+    )
+    y_train = np.array([train_labels[r["company_id"]] for r in train_labeled])
+
+    X_test = _build_feature_matrix(  # noqa: N806
+        test_labeled, PROGRESS_FEATURE_COLUMNS, PROGRESS_CATEGORICAL_FEATURES,
+    )
+    y_test = np.array([test_labels[r["company_id"]] for r in test_labeled])
+
+    # Need both classes in train and test
+    if len(set(y_train)) < 2 or len(set(y_test)) < 2:
+        return None
+
+    clf = HistGradientBoostingClassifier(
+        max_iter=200,
+        max_depth=5,
+        learning_rate=0.1,
+        min_samples_leaf=20,
+        random_state=42,
+    )
+    clf.fit(X_train, y_train)
+
+    if calibrate and len(train_labeled) >= 100:
+        cal_clf = CalibratedClassifierCV(clf, cv=3, method="isotonic")
+        cal_clf.fit(X_train, y_train)
+        model = cal_clf
+    else:
+        model = clf
+
+    y_pred_proba = model.predict_proba(X_test)[:, 1]  # P(progress)
+    auc = roc_auc_score(y_test, y_pred_proba)
+    ece = compute_ece(y_test.tolist(), y_pred_proba.tolist())
+
+    perm = permutation_importance(
+        clf, X_test, y_test, n_repeats=5, random_state=42, scoring="roc_auc",
+    )
+    importances = {f: float(v) for f, v in zip(all_features, perm.importances_mean)}
+
+    return TrainedModel(
+        model=model,
+        feature_names=all_features,
+        auc=auc,
+        ece=ece,
+        n_train=len(train_labeled),
+        n_test=len(test_labeled),
+        feature_importances=importances,
+    )
 
 
 def save_model(model: TrainedModel, path: Path) -> None:

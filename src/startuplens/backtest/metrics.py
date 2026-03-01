@@ -119,17 +119,23 @@ def _calibration_ece(value: float) -> MetricResult:
     )
 
 
-def _portfolio_moic_vs_random(value: float) -> MetricResult:
+def _portfolio_quality_vs_random(value: float) -> MetricResult:
+    """Portfolio quality score ratio: model vs random.
+
+    Uses revenue-growth-weighted outcomes to differentiate quality among
+    survivors.  A ratio > 1.3 means the model picks companies whose
+    post-raise trajectory is 30%+ better than random selection.
+    """
     threshold = 1.3
     return MetricResult(
-        name="Portfolio MOIC vs random",
+        name="Portfolio quality vs random",
         value=value,
         threshold=threshold,
         passed=value > threshold,
         must_pass=True,
         failure_explanation=(
             "Signal isn't worth the complexity. "
-            "Model-selected portfolio must return 30%+ more than random."
+            "Model-selected portfolio must score 30%+ higher than random."
             if value <= threshold else ""
         ),
     )
@@ -233,7 +239,7 @@ def evaluate_backtest(
     *,
     survival_auc: float,
     calibration_ece: float,
-    portfolio_moic_vs_random: float,
+    portfolio_quality_vs_random: float,
     portfolio_failure_rate_vs_random: float,
     claude_text_score_auc: float,
     progress_auc: float = math.nan,
@@ -250,7 +256,7 @@ def evaluate_backtest(
     results: list[MetricResult] = [
         _survival_auc(survival_auc),
         _calibration_ece(calibration_ece),
-        _portfolio_moic_vs_random(portfolio_moic_vs_random),
+        _portfolio_quality_vs_random(portfolio_quality_vs_random),
         _portfolio_failure_rate_vs_random(portfolio_failure_rate_vs_random),
         _claude_text_score_auc(claude_text_score_auc),
         _progress_auc(progress_auc),

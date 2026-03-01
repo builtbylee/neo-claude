@@ -28,6 +28,7 @@ class ScoredDeal:
     has_institutional_coinvestor: bool
     eis_eligible: bool
     outcome: str  # "trading" | "exited" | "failed"
+    revenue_growth: float | None = None  # YoY revenue growth rate
 
 
 # ---------------------------------------------------------------------------

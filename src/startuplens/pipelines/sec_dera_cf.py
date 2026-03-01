@@ -520,12 +520,19 @@ def ingest_dera_cf_batch(conn: psycopg.Connection, records: list[dict]) -> int:
             period_date = rec.get("filing_date")
             if not period_date:
                 continue
+            # Compute revenue growth YoY from prior/current fiscal year
+            rev_growth = None
+            rev_recent = rec.get("revenue_recent")
+            rev_prior = rec.get("revenue_prior")
+            if rev_recent is not None and rev_prior is not None and rev_prior != 0:
+                rev_growth = (rev_recent - rev_prior) / abs(rev_prior)
+
             fd_rows.append((
                 company_id,
                 period_date,
                 "annual",
                 rec.get("revenue_recent"),
-                None,  # revenue_growth_yoy
+                rev_growth,
                 None,  # gross_profit
                 None,  # gross_margin
                 None,  # operating_income
@@ -559,6 +566,67 @@ def ingest_dera_cf_batch(conn: psycopg.Connection, records: list[dict]) -> int:
                     ) VALUES {fd_ph}
                     """,
                     fd_flat,
+                )
+
+        # Phase 4b: Insert financial_data (prior fiscal year)
+        fd_prior_rows = []
+        for rec in deduped:
+            company_id = id_by_source.get(rec.get("source_id"))
+            if not company_id:
+                continue
+            if not any(rec.get(f) is not None for f in (
+                "revenue_prior", "total_assets_prior", "cash_prior",
+                "net_income_prior",
+            )):
+                continue
+            total_debt_prior = None
+            st = rec.get("short_term_debt_prior")
+            lt = rec.get("long_term_debt_prior")
+            if st is not None or lt is not None:
+                total_debt_prior = (st or 0) + (lt or 0)
+
+            period_date = rec.get("filing_date")
+            if not period_date:
+                continue
+            fd_prior_rows.append((
+                company_id,
+                period_date,
+                "prior_annual",
+                rec.get("revenue_prior"),
+                None,  # revenue_growth_yoy
+                None,  # gross_profit
+                None,  # gross_margin
+                None,  # operating_income
+                rec.get("net_income_prior"),
+                rec.get("cash_prior"),
+                rec.get("total_assets_prior"),
+                None,  # total_liabilities
+                total_debt_prior,
+                None,  # employee_count (not available for prior year)
+                None,  # burn_rate_monthly
+                None,  # customers
+                "sec_dera_cf",
+            ))
+
+        if fd_prior_rows:
+            fd_prior_ph = ", ".join(
+                ["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"]
+                * len(fd_prior_rows),
+            )
+            fd_prior_flat = [v for row in fd_prior_rows for v in row]
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO financial_data (
+                        company_id, period_end_date, period_type,
+                        revenue, revenue_growth_yoy, gross_profit,
+                        gross_margin, operating_income, net_income,
+                        cash_and_equivalents, total_assets, total_liabilities,
+                        total_debt, employee_count, burn_rate_monthly,
+                        customers, source_filing
+                    ) VALUES {fd_prior_ph}
+                    """,
+                    fd_prior_flat,
                 )
 
         inserted += len(returned)
