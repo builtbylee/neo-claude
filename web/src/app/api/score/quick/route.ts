@@ -7,7 +7,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { buildProfile, scoreText } from "@/lib/claude/text-scorer";
+import { buildProfile, scoreText, type ExtractedFacts } from "@/lib/claude/text-scorer";
 import { findCompany, getSupabaseClient, loadFeatures } from "@/lib/db/supabase";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
 import { checkGates, type GateCheckInput } from "@/lib/scoring/gates";
@@ -37,6 +37,7 @@ interface QuickScoreResponse {
   categories: Record<string, number>;
   dataCompleteness: number;
   textScores: Record<string, number> | null;
+  extractedFacts: ExtractedFacts | null;
   gates: Array<{
     name: string;
     passed: boolean;
@@ -107,7 +108,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Step 3: Claude text scoring (if pitch text provided and API key available)
-  let textScores = null;
+  let textResult = null;
   if (body.pitchText?.trim() && anthropicKey) {
     const profile = buildProfile({
       name: body.companyName,
@@ -118,13 +119,34 @@ export async function POST(request: NextRequest) {
     });
 
     try {
-      textScores = await scoreText(anthropicKey, profile);
+      textResult = await scoreText(anthropicKey, profile);
     } catch {
       // Claude scoring failed — continue without text scores
     }
   }
 
+  const textScores = textResult?.scores ?? null;
+  const extractedFacts = textResult?.extractedFacts ?? null;
+
+  // Step 3b: Fill missing fields from extracted facts
+  // Extracted facts only override when the user didn't provide a value
+  if (extractedFacts) {
+    if (body.revenue === undefined && extractedFacts.revenue !== null) {
+      features.revenue_at_raise = extractedFacts.revenue;
+    }
+    if (body.fundingTarget === undefined && extractedFacts.fundingTarget !== null) {
+      features.funding_target = extractedFacts.fundingTarget;
+    }
+    if (extractedFacts.employeeCount !== null && !features.employee_count) {
+      features.employee_count = extractedFacts.employeeCount;
+    }
+    if (extractedFacts.companyAgeMonths !== null && !features.company_age_months) {
+      features.company_age_months = extractedFacts.companyAgeMonths;
+    }
+  }
+
   // Step 4: Rubric scoring
+  const effectiveRevenue = (features.revenue_at_raise as number) ?? body.revenue ?? null;
   const rubricInput: RubricInput = {
     mlScore,
     textScore: textScores?.text_quality_score ?? null,
@@ -139,8 +161,8 @@ export async function POST(request: NextRequest) {
           business_model_clarity: textScores.business_model_clarity,
         }
       : null,
-    revenue: (features.revenue_at_raise as number) ?? body.revenue ?? null,
-    preRevenue: !features.revenue_at_raise && !body.revenue,
+    revenue: effectiveRevenue,
+    preRevenue: !effectiveRevenue,
     totalAssets: (features.total_assets as number) ?? null,
     totalDebt: (features.total_debt as number) ?? null,
     cashPosition: (features.cash_position as number) ?? null,
@@ -149,7 +171,7 @@ export async function POST(request: NextRequest) {
     overfundingRatio: (features.overfunding_ratio as number) ?? null,
     hasInstitutionalCoinvestor: false,
     sector: body.sector ?? null,
-    revenueGrowthYoy: null,
+    revenueGrowthYoy: extractedFacts?.revenueGrowthYoy ?? null,
   };
 
   const rubricResult = computeRubric(rubricInput);
@@ -194,6 +216,7 @@ export async function POST(request: NextRequest) {
           Object.entries(textScores).map(([k, v]) => [k, v]),
         )
       : null,
+    extractedFacts: extractedFacts ?? null,
     gates: gates.map((g) => ({
       name: g.name,
       passed: g.passed,

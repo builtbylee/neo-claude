@@ -16,6 +16,13 @@ type ScoreResponse = {
   categories: Record<string, number>;
   dataCompleteness: number;
   textScores: Record<string, number> | null;
+  extractedFacts: {
+    revenue: number | null;
+    fundingTarget: number | null;
+    revenueGrowthYoy: number | null;
+    employeeCount: number | null;
+    companyAgeMonths: number | null;
+  } | null;
   gates: Array<{
     name: string;
     passed: boolean;

@@ -19,7 +19,9 @@ Calibration guidance:
 Return ONLY valid JSON with no additional text or markdown formatting.`;
 
 const USER_TEMPLATE = `Score the company below on 7 dimensions (0-100 each) plus an aggregate \
-text_quality_score (0-100). Dimensions:
+text_quality_score (0-100). Also extract any factual data mentioned in the text.
+
+Scoring dimensions:
 1. CLARITY: Business model focus (name, sector, financials)
 2. CLAIMS_PLAUSIBILITY: Financial trajectory plausibility
 3. PROBLEM_SPECIFICITY: Evidence of real market need
@@ -28,13 +30,31 @@ text_quality_score (0-100). Dimensions:
 6. RISK_HONESTY: Financial risk severity (inverse: lower = more risky)
 7. BUSINESS_MODEL_CLARITY: Revenue pattern coherence
 
+Data extraction — extract these if mentioned (use null if not stated):
+- revenue: Annual revenue in USD (convert from other currencies if needed, e.g. £ or €)
+- funding_target: Amount the company is trying to raise in USD
+- revenue_growth_yoy: Year-over-year revenue growth as a decimal (e.g. 1.5 = 150% growth)
+- employee_count: Number of employees
+- company_age_months: Approximate company age in months (estimate from founding date if given)
+
 --- COMPANY ---
 {profile}
 
-Return a JSON object:
-{"clarity": N, "claims_plausibility": N, "problem_specificity": N, \
+Return a JSON object with two top-level keys:
+{"scores": {"clarity": N, "claims_plausibility": N, "problem_specificity": N, \
 "differentiation_depth": N, "founder_domain_signal": N, "risk_honesty": N, \
-"business_model_clarity": N, "text_quality_score": N}`;
+"business_model_clarity": N, "text_quality_score": N}, \
+"extracted": {"revenue": N_or_null, "funding_target": N_or_null, \
+"revenue_growth_yoy": N_or_null, "employee_count": N_or_null, \
+"company_age_months": N_or_null}}`;
+
+export interface ExtractedFacts {
+  revenue: number | null;
+  fundingTarget: number | null;
+  revenueGrowthYoy: number | null;
+  employeeCount: number | null;
+  companyAgeMonths: number | null;
+}
 
 export interface TextScores {
   clarity: number;
@@ -45,6 +65,11 @@ export interface TextScores {
   risk_honesty: number;
   business_model_clarity: number;
   text_quality_score: number;
+}
+
+export interface TextScoringResult {
+  scores: TextScores;
+  extractedFacts: ExtractedFacts;
 }
 
 const SCORE_DIMENSIONS: (keyof TextScores)[] = [
@@ -94,22 +119,34 @@ export function buildProfile(data: {
   return parts.join("\n");
 }
 
+function parseExtractedFacts(obj: Record<string, unknown>): ExtractedFacts {
+  const numOrNull = (v: unknown): number | null =>
+    typeof v === "number" && isFinite(v) ? v : null;
+  return {
+    revenue: numOrNull(obj.revenue),
+    fundingTarget: numOrNull(obj.funding_target),
+    revenueGrowthYoy: numOrNull(obj.revenue_growth_yoy),
+    employeeCount: numOrNull(obj.employee_count),
+    companyAgeMonths: numOrNull(obj.company_age_months),
+  };
+}
+
 /**
  * Score a company's pitch text using Claude Haiku.
  *
- * Returns dimension scores or null if the API call or parsing fails.
+ * Returns dimension scores + extracted facts, or null if the API call or parsing fails.
  */
 export async function scoreText(
   apiKey: string,
   profile: string,
-): Promise<TextScores | null> {
+): Promise<TextScoringResult | null> {
   const client = new Anthropic({ apiKey });
 
   const prompt = USER_TEMPLATE.replace("{profile}", profile);
 
   const response = await client.messages.create({
     model: "claude-haiku-4-5-20251001",
-    max_tokens: 512,
+    max_tokens: 768,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: prompt }],
   });
@@ -131,7 +168,24 @@ export async function scoreText(
 
   try {
     const parsed = JSON.parse(match[0]);
-    return validateScores(parsed);
+
+    // Handle new format: { scores: {...}, extracted: {...} }
+    if (parsed.scores && typeof parsed.scores === "object") {
+      const scores = validateScores(parsed.scores);
+      if (!scores) return null;
+      const extractedFacts = parsed.extracted
+        ? parseExtractedFacts(parsed.extracted)
+        : { revenue: null, fundingTarget: null, revenueGrowthYoy: null, employeeCount: null, companyAgeMonths: null };
+      return { scores, extractedFacts };
+    }
+
+    // Fallback: old flat format (just scores, no extraction)
+    const scores = validateScores(parsed);
+    if (!scores) return null;
+    return {
+      scores,
+      extractedFacts: { revenue: null, fundingTarget: null, revenueGrowthYoy: null, employeeCount: null, companyAgeMonths: null },
+    };
   } catch {
     return null;
   }

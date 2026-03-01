@@ -12,6 +12,13 @@ interface ScoreResultProps {
     categories: Record<string, number>;
     dataCompleteness: number;
     textScores: Record<string, number> | null;
+    extractedFacts: {
+      revenue: number | null;
+      fundingTarget: number | null;
+      revenueGrowthYoy: number | null;
+      employeeCount: number | null;
+      companyAgeMonths: number | null;
+    } | null;
     gates: Array<{
       name: string;
       passed: boolean;
@@ -168,6 +175,59 @@ export default function ScoreResult({ result }: ScoreResultProps) {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Extracted Facts */}
+      {result.extractedFacts && Object.values(result.extractedFacts).some((v) => v !== null) && (
+        <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+          <h3 className="text-sm font-semibold text-neutral-300 mb-3">
+            Extracted from Pitch Text
+          </h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
+            {result.extractedFacts.revenue !== null && (
+              <div>
+                <span className="text-neutral-500">Revenue: </span>
+                <span className="text-neutral-200 font-medium">
+                  ${result.extractedFacts.revenue.toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.extractedFacts.fundingTarget !== null && (
+              <div>
+                <span className="text-neutral-500">Funding Target: </span>
+                <span className="text-neutral-200 font-medium">
+                  ${result.extractedFacts.fundingTarget.toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.extractedFacts.revenueGrowthYoy !== null && (
+              <div>
+                <span className="text-neutral-500">YoY Growth: </span>
+                <span className="text-neutral-200 font-medium">
+                  {Math.round(result.extractedFacts.revenueGrowthYoy * 100)}%
+                </span>
+              </div>
+            )}
+            {result.extractedFacts.employeeCount !== null && (
+              <div>
+                <span className="text-neutral-500">Employees: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.extractedFacts.employeeCount.toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.extractedFacts.companyAgeMonths !== null && (
+              <div>
+                <span className="text-neutral-500">Company Age: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.extractedFacts.companyAgeMonths >= 12
+                    ? `${Math.round(result.extractedFacts.companyAgeMonths / 12)}y`
+                    : `${result.extractedFacts.companyAgeMonths}mo`}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       )}

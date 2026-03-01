@@ -133,7 +133,7 @@ export default function ScoreForm({ onSubmit, isLoading }: ScoreFormProps) {
             step="1000"
             value={revenue}
             onChange={(e) => setRevenue(e.target.value)}
-            placeholder="0"
+            placeholder="e.g. 500000"
             className="w-full rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-2.5 text-neutral-100 placeholder-neutral-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
           />
         </div>
