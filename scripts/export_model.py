@@ -20,7 +20,7 @@ import typer
 
 from startuplens.backtest.splitter import generate_walk_forward_windows
 from startuplens.config import get_settings
-from startuplens.db import execute_query, get_connection
+from startuplens.db import execute_query, get_connection, refresh_matview
 from startuplens.model.train import (
     CATEGORICAL_FEATURES,
     FEATURE_COLUMNS,
@@ -152,6 +152,11 @@ def main(
     conn = get_connection(settings)
 
     try:
+        # Refresh the materialized view so it reflects current feature_store data.
+        logger.info("refreshing_matview")
+        refresh_matview(conn)
+        logger.info("matview_refreshed")
+
         # Use all windows to get the most data for the final model
         windows = generate_walk_forward_windows()
         last_window = windows[-1]

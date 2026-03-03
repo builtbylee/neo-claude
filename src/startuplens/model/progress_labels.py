@@ -31,7 +31,7 @@ WITH campaign_base AS (
       AND co.outcome IN ('failed', 'trading')
       AND co.campaign_date IS NOT NULL
       AND co.campaign_date BETWEEN %s AND %s
-      AND co.campaign_date <= %s - INTERVAL '18 months'
+      AND co.campaign_date <= %s::date - INTERVAL '18 months'
     ORDER BY co.company_id, co.campaign_date
 ),
 follow_on AS (

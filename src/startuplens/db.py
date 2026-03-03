@@ -29,3 +29,13 @@ def execute_many(conn: psycopg.Connection, query: str, params_list: list[tuple])
     with conn.cursor() as cur:
         cur.executemany(query, params_list)
         return cur.rowcount
+
+
+def refresh_matview(conn: psycopg.Connection, name: str = "training_features_wide") -> None:
+    """Refresh a materialized view so it reflects current feature_store data.
+
+    Uses CONCURRENTLY when possible (requires a unique index on the matview).
+    """
+    with conn.cursor() as cur:
+        cur.execute(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {name}")  # noqa: S608
+    conn.commit()

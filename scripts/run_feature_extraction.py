@@ -9,7 +9,7 @@ import structlog
 import typer
 
 from startuplens.config import get_settings
-from startuplens.db import execute_query, get_connection
+from startuplens.db import execute_query, get_connection, refresh_matview
 from startuplens.feature_store.extractors import (
     extract_campaign_features,
     extract_company_features,
@@ -147,6 +147,11 @@ def main(
 
         conn.commit()
         logger.info("feature_extraction_complete", total_written=total_written)
+
+        # Refresh the materialized view so downstream consumers see new features.
+        logger.info("refreshing_matview")
+        refresh_matview(conn)
+        logger.info("matview_refreshed")
 
     finally:
         conn.close()

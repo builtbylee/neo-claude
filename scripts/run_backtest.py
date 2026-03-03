@@ -30,7 +30,7 @@ from startuplens.backtest.simulator import (
 from startuplens.backtest.splitter import generate_walk_forward_windows
 from startuplens.backtest.text_score_auc import compute_claude_text_auc
 from startuplens.config import get_settings
-from startuplens.db import execute_query, get_connection
+from startuplens.db import execute_query, get_connection, refresh_matview
 from startuplens.model.progress_labels import load_progress_labels
 from startuplens.model.train import score_deals, train_model, train_progress_model
 
@@ -184,6 +184,12 @@ def main(
     )
 
     try:
+        # Refresh the materialized view so it reflects current feature_store data.
+        # Without this, the matview contains a stale snapshot from migration time.
+        logger.info("refreshing_matview")
+        refresh_matview(conn)
+        logger.info("matview_refreshed")
+
         windows = generate_walk_forward_windows()
         prior_deals: list[ScoredDeal] = []
         window_results: list[dict] = []
