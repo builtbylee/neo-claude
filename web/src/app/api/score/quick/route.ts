@@ -78,6 +78,7 @@ export async function POST(request: NextRequest) {
   // Step 1: Entity match — look up company in database (optional)
   let company = null;
   let features: CompanyFeatures = {};
+  let stageBucket: string | null = null;
   let dealTerms: DealTermsRow | null = null;
   let regulatoryStatus: { companyStatus: string | null; companyNumber: string | null } | null = null;
 
@@ -109,6 +110,7 @@ export async function POST(request: NextRequest) {
 
       const featureRow = await loadFeatures(supabase, company.entity_id);
       if (featureRow) {
+        stageBucket = featureRow.stage_bucket ?? null;
         features = {
           company_age_months: featureRow.company_age_months,
           employee_count: featureRow.employee_count,
@@ -334,9 +336,11 @@ export async function POST(request: NextRequest) {
       comparables = await findComparables(supabase, {
         sector: body.sector ?? company?.sector ?? null,
         country: (features.country as string) ?? company?.country ?? null,
+        stageBucket,
         fundingTarget: (features.funding_target as number) ?? body.fundingTarget ?? null,
         companyAge: (features.company_age_months as number) ?? null,
         revenue: effectiveRevenue,
+        excludeCompanyId: company?.id ?? null,
       });
     } catch {
       // Comparables query failed — continue without it

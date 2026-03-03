@@ -8,7 +8,8 @@
     "build:cf": "npx @opennextjs/cloudflare build",
     "preview": "npx wrangler dev",
     "deploy": "npx wrangler deploy",
-    "start": "next start"
+    "start": "next start",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
@@ -25,6 +26,7 @@
     "@types/react": "^18.3.28",
     "@types/react-dom": "^18.3.7",
     "tailwindcss": "^4",
+    "tsx": "^4.20.5",
     "typescript": "^5"
   }
 }

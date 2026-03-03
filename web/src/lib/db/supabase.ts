@@ -24,6 +24,7 @@ export interface CompanyRow {
 
 export interface FeatureRow {
   entity_id: string;
+  stage_bucket: string | null;
   company_age_months: number | null;
   employee_count: number | null;
   revenue_at_raise: number | null;

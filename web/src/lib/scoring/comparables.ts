@@ -29,6 +29,7 @@ export interface Comparable {
   name: string;
   sector: string | null;
   country: string | null;
+  stageBucket: string | null;
   fundingTarget: number | null;
   revenueAtRaise: number | null;
   companyAgeMonths: number | null;
@@ -47,6 +48,7 @@ interface CohortRow {
   company_id: string;
   sector: string | null;
   country: string | null;
+  stage_bucket: string | null;
   platform: string | null;
   campaign_date: string | null;
   funding_target: number | null;
@@ -59,6 +61,17 @@ interface CohortRow {
   outcome: string;
   company_name: string | null;
 }
+
+interface CohortFilters {
+  sector?: string | null;
+  country?: string | null;
+  stageBucket?: string | null;
+}
+
+type CohortQueryFn = (
+  supabase: AnySupabaseClient,
+  filters: CohortFilters,
+) => Promise<CohortRow[]>;
 
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
@@ -156,18 +169,20 @@ function dealDistance(
 /**
  * Run a cohort query with the given filters.
  */
-async function queryCohort(
+export async function queryCohort(
   supabase: AnySupabaseClient,
-  filters: { sector?: string | null; country?: string | null },
+  filters: CohortFilters,
 ): Promise<CohortRow[]> {
   const selectFields =
-    "company_id, sector, country, platform, campaign_date, funding_target, amount_raised, overfunding_ratio, company_age_at_raise_months, had_revenue, revenue_at_raise, qualified_institutional_coinvestor, outcome, companies(name)";
+    "company_id, sector, country, stage_bucket, platform, campaign_date, funding_target, amount_raised, overfunding_ratio, company_age_at_raise_months, had_revenue, revenue_at_raise, qualified_institutional_coinvestor, outcome, companies(name)";
 
   let query = supabase
     .from("crowdfunding_outcomes")
     .select(selectFields)
     .lte("label_quality_tier", 2)
     .in("outcome", ["failed", "trading", "exited"])
+    .order("campaign_date", { ascending: false })
+    .order("company_id", { ascending: true })
     .limit(1000);
 
   if (filters.sector) {
@@ -175,6 +190,9 @@ async function queryCohort(
   }
   if (filters.country) {
     query = query.eq("country", filters.country);
+  }
+  if (filters.stageBucket) {
+    query = query.eq("stage_bucket", filters.stageBucket);
   }
 
   const { data, error } = await query;
@@ -185,6 +203,7 @@ async function queryCohort(
     company_id: r.company_id as string,
     sector: r.sector as string | null,
     country: r.country as string | null,
+    stage_bucket: r.stage_bucket as string | null,
     platform: r.platform as string | null,
     campaign_date: r.campaign_date as string | null,
     funding_target: r.funding_target as number | null,
@@ -213,53 +232,75 @@ export async function findComparables(
   input: {
     sector?: string | null;
     country?: string | null;
+    stageBucket?: string | null;
     fundingTarget?: number | null;
     companyAge?: number | null;
     revenue?: number | null;
+    excludeCompanyId?: string | null;
+  },
+  options?: {
+    minCohort?: number;
+    queryCohortFn?: CohortQueryFn;
   },
 ): Promise<ComparablesResult | null> {
-  const MIN_COHORT = 20;
+  const minCohort = options?.minCohort ?? 20;
+  const queryCohortFn = options?.queryCohortFn ?? queryCohort;
 
   const attempts: Array<{
     label: string;
-    filters: { sector?: string | null; country?: string | null };
+    filters: CohortFilters;
   }> = [];
+  const stageLabel = input.stageBucket ? ` (${input.stageBucket})` : "";
 
   if (input.sector && input.country) {
     attempts.push({
-      label: `${input.sector} companies in ${input.country}`,
-      filters: { sector: input.sector, country: input.country },
+      label: `${input.sector} companies in ${input.country}${stageLabel}`,
+      filters: {
+        sector: input.sector,
+        country: input.country,
+        stageBucket: input.stageBucket ?? null,
+      },
     });
   }
 
   if (input.sector) {
     attempts.push({
-      label: `${input.sector} companies`,
-      filters: { sector: input.sector },
+      label: `${input.sector} companies${stageLabel}`,
+      filters: { sector: input.sector, stageBucket: input.stageBucket ?? null },
     });
   }
 
   if (input.country) {
     attempts.push({
-      label: `companies in ${input.country}`,
-      filters: { country: input.country },
+      label: `companies in ${input.country}${stageLabel}`,
+      filters: { country: input.country, stageBucket: input.stageBucket ?? null },
+    });
+  }
+
+  if (input.stageBucket) {
+    attempts.push({
+      label: `${input.stageBucket} companies`,
+      filters: { stageBucket: input.stageBucket },
     });
   }
 
   attempts.push({
-    label: "all crowdfunding companies",
+    label: input.stageBucket ? "all crowdfunding companies (all stages)" : "all crowdfunding companies",
     filters: {},
   });
 
   for (const attempt of attempts) {
-    const rows = await queryCohort(supabase, attempt.filters);
+    const rows = await queryCohortFn(supabase, attempt.filters);
+    const cohortRows = input.excludeCompanyId
+      ? rows.filter((r) => r.company_id !== input.excludeCompanyId)
+      : rows;
 
-    if (rows.length < MIN_COHORT) continue;
+    if (cohortRows.length < minCohort) continue;
 
-    const cohortStats = computeStats(rows);
+    const cohortStats = computeStats(cohortRows);
 
     // Find nearest neighbors
-    const ranked = rows
+    const ranked = cohortRows
       .filter((r) => r.company_name)
       .map((r) => ({
         row: r,
@@ -272,6 +313,7 @@ export async function findComparables(
       name: row.company_name ?? "Unknown",
       sector: row.sector,
       country: row.country,
+      stageBucket: row.stage_bucket,
       fundingTarget: row.funding_target,
       revenueAtRaise: row.revenue_at_raise,
       companyAgeMonths: row.company_age_at_raise_months,
