@@ -11,23 +11,39 @@ jobs:
     env:
       SL_DATABASE_URL: ${{ secrets.SL_DATABASE_URL }}
     steps:
+      - name: Preflight secrets
+        id: preflight
+        run: |
+          if [ -z "${SL_DATABASE_URL}" ]; then
+            echo "::warning::Missing SL_DATABASE_URL; skipping Weekly Evidence Refresh."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.preflight.outputs.should_run == 'true'
 
       - name: Set up Python
+        if: steps.preflight.outputs.should_run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: steps.preflight.outputs.should_run == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
       - name: Reconcile valuation outcomes
+        if: steps.preflight.outputs.should_run == 'true'
         run: python scripts/run_valuation_audit_reconcile.py
 
       - name: Compute valuation cohort MAE
+        if: steps.preflight.outputs.should_run == 'true'
         run: python scripts/run_valuation_cohort_mae.py
 
       - name: Generate quarterly evidence report
+        if: steps.preflight.outputs.should_run == 'true'
         run: python scripts/run_quarterly_evidence_report.py

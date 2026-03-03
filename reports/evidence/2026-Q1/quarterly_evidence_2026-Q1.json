@@ -1,0 +1,302 @@
+{
+  "quarter": "2026-01-01",
+  "quarterLabel": "2026-Q1",
+  "generatedAt": "2026-03-03",
+  "holdoutWindow": "2023-2025",
+  "holdoutEntityCount": 9101,
+  "segments": [
+    {
+      "segmentKey": "UK_EarlyGrowth",
+      "sampleSize": 5112,
+      "survivalAuc": 0.720370112167009,
+      "calibrationEce": 0.0237139296887764,
+      "releaseGateOpen": true,
+      "lastBacktestDate": "2026-03-03",
+      "rollingWindows": [
+        {
+          "segment_key": "UK_EarlyGrowth",
+          "window_label": "Train 2016-2022, Test 2023-2025",
+          "test_start": "2023-01-01",
+          "test_end": "2025-12-31",
+          "survival_auc": 0.795577130528587,
+          "calibration_ece": 0.0592783553797326,
+          "quality_vs_random": 2.57427536104315,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00256581883087907,
+          "top_k_sector_concentration": 0.2
+        },
+        {
+          "segment_key": "UK_EarlyGrowth",
+          "window_label": "Train 2016-2022, Test 2023-2025",
+          "test_start": "2023-01-01",
+          "test_end": "2025-12-31",
+          "survival_auc": 0.762376919369276,
+          "calibration_ece": 0.0610627352007948,
+          "quality_vs_random": 2.57427536104315,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00234270414993307,
+          "top_k_sector_concentration": 0.18
+        },
+        {
+          "segment_key": "UK_EarlyGrowth",
+          "window_label": "Train 2016-2021, Test 2022",
+          "test_start": "2022-01-01",
+          "test_end": "2022-12-31",
+          "survival_auc": 0.758939800204067,
+          "calibration_ece": 0.0201941432780628,
+          "quality_vs_random": 1.18170995339307,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00249584026622296,
+          "top_k_sector_concentration": 0.22
+        },
+        {
+          "segment_key": "UK_EarlyGrowth",
+          "window_label": "Train 2016-2021, Test 2022",
+          "test_start": "2022-01-01",
+          "test_end": "2022-12-31",
+          "survival_auc": 0.82736160216406,
+          "calibration_ece": 0.0176283699349105,
+          "quality_vs_random": 1.38143133714944,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00249584026622296,
+          "top_k_sector_concentration": 0.26
+        },
+        {
+          "segment_key": "UK_EarlyGrowth",
+          "window_label": "Train 2016-2020, Test 2021",
+          "test_start": "2021-01-01",
+          "test_end": "2021-12-31",
+          "survival_auc": 0.759543817527011,
+          "calibration_ece": 0.0205453273906509,
+          "quality_vs_random": 0.994084142460014,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00202156334231806,
+          "top_k_sector_concentration": 0.34
+        }
+      ],
+      "calibrationCurveError": 0.0280507623635515,
+      "valuationMae": {},
+      "evidenceOk": true
+    },
+    {
+      "segmentKey": "UK_Seed",
+      "sampleSize": 5112,
+      "survivalAuc": 0.786254896597547,
+      "calibrationEce": 0.0231538128965549,
+      "releaseGateOpen": true,
+      "lastBacktestDate": "2026-03-03",
+      "rollingWindows": [
+        {
+          "segment_key": "UK_Seed",
+          "window_label": "Train 2016-2022, Test 2023-2025",
+          "test_start": "2023-01-01",
+          "test_end": "2025-12-31",
+          "survival_auc": 0.785768933568975,
+          "calibration_ece": 0.0603725324393714,
+          "quality_vs_random": 2.57427536104315,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00156180276662204,
+          "top_k_sector_concentration": 0.18
+        },
+        {
+          "segment_key": "UK_Seed",
+          "window_label": "Train 2016-2022, Test 2023-2025",
+          "test_start": "2023-01-01",
+          "test_end": "2025-12-31",
+          "survival_auc": 0.7924365183196,
+          "calibration_ece": 0.0563807462051554,
+          "quality_vs_random": 2.57427536104315,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00535475234270415,
+          "top_k_sector_concentration": 0.18
+        },
+        {
+          "segment_key": "UK_Seed",
+          "window_label": "Train 2016-2021, Test 2022",
+          "test_start": "2022-01-01",
+          "test_end": "2022-12-31",
+          "survival_auc": 0.795873573309921,
+          "calibration_ece": 0.0209791916553587,
+          "quality_vs_random": 1.19270645562899,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00374376039933444,
+          "top_k_sector_concentration": 0.24
+        },
+        {
+          "segment_key": "UK_Seed",
+          "window_label": "Train 2016-2021, Test 2022",
+          "test_start": "2022-01-01",
+          "test_end": "2022-12-31",
+          "survival_auc": 0.750183897681703,
+          "calibration_ece": 0.0175560220105638,
+          "quality_vs_random": 1.14724230709247,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00187188019966722,
+          "top_k_sector_concentration": 0.18
+        },
+        {
+          "segment_key": "UK_Seed",
+          "window_label": "Train 2016-2020, Test 2021",
+          "test_start": "2021-01-01",
+          "test_end": "2021-12-31",
+          "survival_auc": 0.764279044951314,
+          "calibration_ece": 0.0182638795121328,
+          "quality_vs_random": 1.09408414246001,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00157232704402516,
+          "top_k_sector_concentration": 0.44
+        }
+      ],
+      "calibrationCurveError": 0.027002499296873154,
+      "valuationMae": {},
+      "evidenceOk": true
+    },
+    {
+      "segmentKey": "US_EarlyGrowth",
+      "sampleSize": 5112,
+      "survivalAuc": 0.727427492639447,
+      "calibrationEce": 0.0239621246648965,
+      "releaseGateOpen": true,
+      "lastBacktestDate": "2026-03-03",
+      "rollingWindows": [
+        {
+          "segment_key": "US_EarlyGrowth",
+          "window_label": "Train 2016-2022, Test 2023-2025",
+          "test_start": "2023-01-01",
+          "test_end": "2025-12-31",
+          "survival_auc": 0.788511709395824,
+          "calibration_ece": 0.0618818290311798,
+          "quality_vs_random": 2.57427536104315,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00178491744756805,
+          "top_k_sector_concentration": 0.28
+        },
+        {
+          "segment_key": "US_EarlyGrowth",
+          "window_label": "Train 2016-2022, Test 2023-2025",
+          "test_start": "2023-01-01",
+          "test_end": "2025-12-31",
+          "survival_auc": 0.79126213592233,
+          "calibration_ece": 0.0600916285709994,
+          "quality_vs_random": 2.57427536104315,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00223114680946006,
+          "top_k_sector_concentration": 0.2
+        },
+        {
+          "segment_key": "US_EarlyGrowth",
+          "window_label": "Train 2016-2021, Test 2022",
+          "test_start": "2022-01-01",
+          "test_end": "2022-12-31",
+          "survival_auc": 0.769771966874689,
+          "calibration_ece": 0.0183770022013546,
+          "quality_vs_random": 1.17644764786044,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.0031198003327787,
+          "top_k_sector_concentration": 0.26
+        },
+        {
+          "segment_key": "US_EarlyGrowth",
+          "window_label": "Train 2016-2021, Test 2022",
+          "test_start": "2022-01-01",
+          "test_end": "2022-12-31",
+          "survival_auc": 0.797890515625371,
+          "calibration_ece": 0.018083872974013,
+          "quality_vs_random": 1.17644764786044,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00187188019966722,
+          "top_k_sector_concentration": 0.34
+        },
+        {
+          "segment_key": "US_EarlyGrowth",
+          "window_label": "Train 2016-2020, Test 2021",
+          "test_start": "2021-01-01",
+          "test_end": "2021-12-31",
+          "survival_auc": 0.711631319194344,
+          "calibration_ece": 0.0204704347260978,
+          "quality_vs_random": 1.28986608599069,
+          "failure_vs_random": 0.25,
+          "model_uncertainty_rate": 0.00134770889487871,
+          "top_k_sector_concentration": 0.46
+        }
+      ],
+      "calibrationCurveError": 0.02806032538127848,
+      "valuationMae": {},
+      "evidenceOk": true
+    },
+    {
+      "segmentKey": "US_Seed",
+      "sampleSize": 5112,
+      "survivalAuc": 0.772560149481463,
+      "calibrationEce": 0.0232896684867714,
+      "releaseGateOpen": true,
+      "lastBacktestDate": "2026-03-03",
+      "rollingWindows": [
+        {
+          "segment_key": "US_Seed",
+          "window_label": "Train 2016-2022, Test 2023-2025",
+          "test_start": "2023-01-01",
+          "test_end": "2025-12-31",
+          "survival_auc": 0.805637800576863,
+          "calibration_ece": 0.0595165040204796,
+          "quality_vs_random": null,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.0065597667638484,
+          "top_k_sector_concentration": 0.34
+        },
+        {
+          "segment_key": "US_Seed",
+          "window_label": "Train 2016-2022, Test 2023-2025",
+          "test_start": "2023-01-01",
+          "test_end": "2025-12-31",
+          "survival_auc": 0.785707727971723,
+          "calibration_ece": 0.0583353378704439,
+          "quality_vs_random": null,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00510204081632653,
+          "top_k_sector_concentration": 0.32
+        },
+        {
+          "segment_key": "US_Seed",
+          "window_label": "Train 2016-2021, Test 2022",
+          "test_start": "2022-01-01",
+          "test_end": "2022-12-31",
+          "survival_auc": 0.783285480388202,
+          "calibration_ece": 0.0178158999859402,
+          "quality_vs_random": 5.73621153546237,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00340136054421769,
+          "top_k_sector_concentration": 0.28
+        },
+        {
+          "segment_key": "US_Seed",
+          "window_label": "Train 2016-2021, Test 2022",
+          "test_start": "2022-01-01",
+          "test_end": "2022-12-31",
+          "survival_auc": 0.816019267731296,
+          "calibration_ece": 0.0157697437263993,
+          "quality_vs_random": 5.73621153546237,
+          "failure_vs_random": 0.0,
+          "model_uncertainty_rate": 0.00425170068027211,
+          "top_k_sector_concentration": 0.26
+        },
+        {
+          "segment_key": "US_Seed",
+          "window_label": "Train 2016-2020, Test 2021",
+          "test_start": "2021-01-01",
+          "test_end": "2021-12-31",
+          "survival_auc": 0.814232359610511,
+          "calibration_ece": 0.0208617436678233,
+          "quality_vs_random": null,
+          "failure_vs_random": 0.2,
+          "model_uncertainty_rate": 0.00361663652802893,
+          "top_k_sector_concentration": 0.26
+        }
+      ],
+      "calibrationCurveError": 0.027261122281499413,
+      "valuationMae": {},
+      "evidenceOk": true
+    }
+  ],
+  "releaseReady": true
+}

@@ -12,9 +12,27 @@ jobs:
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
+      - name: Preflight secrets
+        id: preflight
+        run: |
+          missing=0
+          for key in CLOUDFLARE_API_TOKEN SUPABASE_URL SUPABASE_ANON_KEY ANTHROPIC_API_KEY; do
+            if [ -z "${!key}" ]; then
+              echo "::warning::Missing $key; skipping Deploy Workers."
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.preflight.outputs.should_run == 'true'
 
       - name: Set up Node
+        if: steps.preflight.outputs.should_run == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -22,9 +40,11 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
+        if: steps.preflight.outputs.should_run == 'true'
         run: npm --prefix web ci
 
       - name: Write worker vars
+        if: steps.preflight.outputs.should_run == 'true'
         run: |
           cat > web/.dev.vars <<EOF
           SUPABASE_URL=${SUPABASE_URL}
@@ -33,4 +53,5 @@ jobs:
           EOF
 
       - name: Deploy
+        if: steps.preflight.outputs.should_run == 'true'
         run: bash scripts/deploy_workers.sh
