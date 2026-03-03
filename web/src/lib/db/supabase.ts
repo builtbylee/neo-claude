@@ -17,7 +17,6 @@ export interface CompanyRow {
   id: string;
   name: string;
   sector: string | null;
-  platform: string | null;
   country: string | null;
   source: string;
   entity_id: string | null;
@@ -52,7 +51,7 @@ export async function findCompany(
   // Try exact match first
   const { data: exact } = await supabase
     .from("companies")
-    .select("id, name, sector, platform, country, source, entity_id")
+    .select("id, name, sector, country, source, entity_id")
     .ilike("name", name)
     .limit(1);
 
@@ -61,7 +60,7 @@ export async function findCompany(
   // Try fuzzy match with LIKE
   const { data: fuzzy } = await supabase
     .from("companies")
-    .select("id, name, sector, platform, country, source, entity_id")
+    .select("id, name, sector, country, source, entity_id")
     .ilike("name", `%${name}%`)
     .limit(1);
 

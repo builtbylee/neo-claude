@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
           amount_raised: featureRow.amount_raised,
           overfunding_ratio: featureRow.overfunding_ratio,
           instrument_type: featureRow.instrument_type,
-          platform: featureRow.platform ?? company.platform,
+          platform: featureRow.platform ?? null,
           country: featureRow.country ?? company.country,
         };
       }
