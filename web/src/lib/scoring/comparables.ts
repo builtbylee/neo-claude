@@ -353,7 +353,7 @@ export async function queryCohort(
     .in("outcome", ["failed", "trading", "exited"])
     .order("campaign_date", { ascending: false })
     .order("company_id", { ascending: true })
-    .limit(1500);
+    .limit(900);
 
   if (filters.sector) query = query.eq("sector", filters.sector);
   if (filters.country) query = query.eq("country", filters.country);
@@ -385,6 +385,7 @@ export async function queryCohort(
 async function queryPricingFromTrainingFeatures(
   supabase: AnySupabaseClient,
   filters: CohortFilters,
+  limit = 1500,
 ): Promise<PricingCohortRow[]> {
   let query = supabase
     .from("training_features_wide")
@@ -392,7 +393,7 @@ async function queryPricingFromTrainingFeatures(
     .not("pre_money_valuation", "is", null)
     .gt("pre_money_valuation", 0)
     .order("as_of_date", { ascending: false })
-    .limit(5000);
+    .limit(limit);
 
   if (filters.sector) query = query.eq("sector", filters.sector);
   if (filters.country) query = query.eq("country", filters.country);
@@ -415,6 +416,7 @@ async function queryPricingFromTrainingFeatures(
 async function queryPricingFromFundingRounds(
   supabase: AnySupabaseClient,
   filters: CohortFilters,
+  limit = 1500,
 ): Promise<PricingCohortRow[]> {
   const { data, error } = await supabase
     .from("funding_rounds")
@@ -422,7 +424,7 @@ async function queryPricingFromFundingRounds(
     .not("pre_money_valuation", "is", null)
     .gt("pre_money_valuation", 0)
     .order("round_date", { ascending: false })
-    .limit(5000);
+    .limit(limit);
 
   if (error || !data) return [];
 
@@ -491,11 +493,17 @@ async function queryPricingFromFundingRounds(
 export async function queryPricingCohort(
   supabase: AnySupabaseClient,
   filters: CohortFilters,
+  opts?: {
+    liteMode?: boolean;
+    maxRows?: number;
+  },
 ): Promise<PricingCohortRow[]> {
-  const [tfwRows, roundRows] = await Promise.all([
-    queryPricingFromTrainingFeatures(supabase, filters),
-    queryPricingFromFundingRounds(supabase, filters),
-  ]);
+  const maxRows = opts?.maxRows ?? 1500;
+  const tfwRows = await queryPricingFromTrainingFeatures(supabase, filters, maxRows);
+  if (opts?.liteMode) {
+    return tfwRows;
+  }
+  const roundRows = await queryPricingFromFundingRounds(supabase, filters, maxRows);
 
   const seen = new Set<string>();
   const out: PricingCohortRow[] = [];
@@ -525,12 +533,19 @@ export async function findComparables(
     minCohort?: number;
     queryCohortFn?: OutcomeQueryFn;
     queryPricingCohortFn?: PricingQueryFn;
+    liteMode?: boolean;
+    maxRows?: number;
   },
 ): Promise<ComparablesResult | null> {
   const minCohort = options?.minCohort ?? 20;
   const queryCohortFn = options?.queryCohortFn ?? queryCohort;
   const queryPricingCohortFn = options?.queryPricingCohortFn
-    ?? (options?.queryCohortFn ? async () => [] : queryPricingCohort);
+    ?? (options?.queryCohortFn
+      ? async () => []
+      : (sb: AnySupabaseClient, filters: CohortFilters) => queryPricingCohort(sb, filters, {
+          liteMode: options?.liteMode,
+          maxRows: options?.maxRows,
+        }));
   const stageLabel = input.stageBucket ? ` (${input.stageBucket})` : "";
 
   const attempts: Array<{ label: string; filters: CohortFilters }> = [];
@@ -634,14 +649,19 @@ export async function findComparables(
         sourceTier: "B",
       });
 
-    const ranked = outcomeRows
-      .filter((r) => r.company_name)
-      .map((r) => ({
-        row: r,
-        dist: dealDistance(input, r),
-      }))
-      .sort((a, b) => a.dist - b.dist)
-      .slice(0, 5);
+    const ranked = (options?.liteMode
+      ? outcomeRows
+        .filter((r) => r.company_name)
+        .slice(0, 3)
+        .map((r) => ({ row: r, dist: 0 }))
+      : outcomeRows
+        .filter((r) => r.company_name)
+        .map((r) => ({
+          row: r,
+          dist: dealDistance(input, r),
+        }))
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, 5));
 
     const nearestDeals: Comparable[] = ranked.map(({ row }) => ({
       name: row.company_name ?? "Unknown",

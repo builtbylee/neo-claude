@@ -414,23 +414,34 @@ export async function POST(request: NextRequest) {
     // Segment evidence unavailable — gate will abstain
   }
 
-  try {
-    sanctions = await screenNameAgainstSanctions(body.companyName);
-    await insertSanctionsScreening(supabase, {
-      screened_name: body.companyName.trim(),
-      normalized_name: body.companyName
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, " ")
-        .replace(/\\s+/g, " ")
-        .trim(),
-      matched: sanctions.matched,
-      match_source: sanctions.matchSource,
-      match_name: sanctions.matchName,
-      risk_level: sanctions.riskLevel,
-      details: { reason: sanctions.reason },
-    });
-  } catch {
-    // Screening errors should not break scoring
+  if (process.env.ENABLE_SANCTIONS_SCREENING === "true") {
+    try {
+      sanctions = await screenNameAgainstSanctions(body.companyName);
+      await insertSanctionsScreening(supabase, {
+        screened_name: body.companyName.trim(),
+        normalized_name: body.companyName
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, " ")
+          .replace(/\\s+/g, " ")
+          .trim(),
+        matched: sanctions.matched,
+        match_source: sanctions.matchSource,
+        match_name: sanctions.matchName,
+        risk_level: sanctions.riskLevel,
+        details: { reason: sanctions.reason },
+      });
+    } catch {
+      // Screening errors should not break scoring
+    }
+  } else {
+    sanctions = {
+      checked: false,
+      matched: false,
+      riskLevel: "clear",
+      matchSource: null,
+      matchName: null,
+      reason: "Sanctions screening disabled in runtime profile.",
+    };
   }
 
   // Step 4: Comparables — used for valuation context and final output
@@ -446,6 +457,9 @@ export async function POST(request: NextRequest) {
       companyAge: (features.company_age_months as number) ?? null,
       revenue: effectiveRevenue,
       excludeCompanyId: company?.id ?? null,
+    }, {
+      liteMode: true,
+      maxRows: 900,
     });
   } catch {
     // Comparables query failed — continue without it
