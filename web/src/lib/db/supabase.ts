@@ -189,6 +189,43 @@ export interface FeatureProvenanceRow {
   as_of_date: string;
 }
 
+export interface SegmentEvidenceRow {
+  segment_key: string;
+  sample_size: number;
+  survival_auc: number | null;
+  calibration_ece: number | null;
+  release_gate_open: boolean;
+  last_backtest_date: string | null;
+  notes: string | null;
+}
+
+export interface ValuationAuditInsert {
+  company_id: string | null;
+  entity_id: string | null;
+  evaluation_type: string;
+  segment_key: string | null;
+  recommendation_class: string | null;
+  score: number | null;
+  data_completeness: number | null;
+  valuation_confidence: "high" | "medium" | "low" | null;
+  valuation_confidence_reason: string | null;
+  valuation_source_summary: Record<string, unknown> | null;
+  entry_multiple: number | null;
+  bear_moic: number | null;
+  base_moic: number | null;
+  bull_moic: number | null;
+}
+
+export interface SanctionsScreeningInsert {
+  screened_name: string;
+  normalized_name: string;
+  matched: boolean;
+  match_source: string | null;
+  match_name: string | null;
+  risk_level: "clear" | "potential_match";
+  details: Record<string, unknown>;
+}
+
 /**
  * Load latest provenance entries for selected features.
  */
@@ -217,4 +254,33 @@ export async function loadFeatureProvenance(
   }
 
   return Array.from(latestByFeature.values());
+}
+
+export async function loadSegmentEvidence(
+  supabase: AnySupabaseClient,
+  segmentKey: string,
+): Promise<SegmentEvidenceRow | null> {
+  const { data } = await supabase
+    .from("segment_model_evidence")
+    .select(
+      "segment_key, sample_size, survival_auc, calibration_ece, release_gate_open, last_backtest_date, notes",
+    )
+    .eq("segment_key", segmentKey)
+    .maybeSingle();
+  if (!data) return null;
+  return data as SegmentEvidenceRow;
+}
+
+export async function insertValuationScenarioAudit(
+  supabase: AnySupabaseClient,
+  payload: ValuationAuditInsert,
+): Promise<void> {
+  await supabase.from("valuation_scenario_audits").insert(payload);
+}
+
+export async function insertSanctionsScreening(
+  supabase: AnySupabaseClient,
+  payload: SanctionsScreeningInsert,
+): Promise<void> {
+  await supabase.from("sanctions_screenings").insert(payload);
 }

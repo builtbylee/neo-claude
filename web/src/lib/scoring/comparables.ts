@@ -1,9 +1,9 @@
 /**
  * Comparables engine — combines:
  * 1) outcome cohorts (crowdfunding_outcomes) for survival/failure base rates
- * 2) broader pricing cohorts (training_features_wide) for valuation multiples
+ * 2) broad pricing cohorts (training_features_wide + funding_rounds) for valuation context
  *
- * This improves valuation context breadth while keeping free-data constraints.
+ * This improves valuation context breadth with free/public data only.
  */
 
 import { type SupabaseClient } from "@supabase/supabase-js";
@@ -47,6 +47,8 @@ export interface ValuationContext {
   note: string;
   dataSource: "pricing_cohort" | "outcome_cohort";
   sampleSize: number;
+  multipleType: "revenue_multiple" | "raise_proxy_multiple";
+  sourceTier: "A" | "B" | "C";
 }
 
 export interface ComparablesResult {
@@ -57,8 +59,13 @@ export interface ComparablesResult {
   sourceSummary: {
     outcomeSampleSize: number;
     pricingSampleSize: number;
+    pricingRevenueSampleSize: number;
+    pricingProxySampleSize: number;
+    pricingSourceBreakdown: Record<string, number>;
   };
   sourceConfidence: "low" | "medium" | "high";
+  valuationConfidence: "low" | "medium" | "high";
+  valuationConfidenceReason: string;
 }
 
 interface OutcomeCohortRow {
@@ -81,11 +88,14 @@ interface OutcomeCohortRow {
 }
 
 interface PricingCohortRow {
-  entity_id: string;
+  key: string;
   sector: string | null;
   country: string | null;
   pre_money_valuation: number | null;
   revenue_at_raise: number | null;
+  amount_raised: number | null;
+  source: string;
+  sourceTier: "A" | "B" | "C";
 }
 
 interface CohortFilters {
@@ -189,19 +199,33 @@ function computeStats(rows: OutcomeCohortRow[]): CohortStats {
 
 function buildValuationContext(
   multiples: number[],
-  input: { preMoneyValuation?: number | null; revenue?: number | null },
-  dataSource: ValuationContext["dataSource"],
+  input: { preMoneyValuation?: number | null; revenue?: number | null; fundingTarget?: number | null },
+  opts: {
+    dataSource: ValuationContext["dataSource"];
+    multipleType: ValuationContext["multipleType"];
+    sourceTier: ValuationContext["sourceTier"];
+  },
 ): ValuationContext | null {
-  if (!input.preMoneyValuation || !input.revenue || input.revenue <= 0) {
+  if (!input.preMoneyValuation || input.preMoneyValuation <= 0) {
+    return null;
+  }
+
+  let impliedMultiple: number | null = null;
+  if (opts.multipleType === "revenue_multiple") {
+    if (!input.revenue || input.revenue <= 0) return null;
+    impliedMultiple = input.preMoneyValuation / input.revenue;
+  } else {
+    if (!input.fundingTarget || input.fundingTarget <= 0) return null;
+    impliedMultiple = input.preMoneyValuation / input.fundingTarget;
+  }
+
+  if (!impliedMultiple || !isFinite(impliedMultiple) || impliedMultiple <= 0) {
     return null;
   }
   if (multiples.length < 20) return null;
 
-  const impliedRevenueMultiple = input.preMoneyValuation / input.revenue;
-  if (!isFinite(impliedRevenueMultiple) || impliedRevenueMultiple <= 0) return null;
-
   const sorted = [...multiples].sort((a, b) => a - b);
-  const lessOrEqual = sorted.filter((m) => m <= impliedRevenueMultiple).length;
+  const lessOrEqual = sorted.filter((m) => m <= impliedMultiple).length;
   const valuationPercentile = Math.round((lessOrEqual / sorted.length) * 100);
   const cohortMedianMultiple = median(sorted);
   if (cohortMedianMultiple === null) return null;
@@ -218,12 +242,14 @@ function buildValuationContext(
 
   return {
     valuationPercentile,
-    impliedRevenueMultiple: Math.round(impliedRevenueMultiple * 10) / 10,
+    impliedRevenueMultiple: Math.round(impliedMultiple * 10) / 10,
     cohortMedianMultiple: Math.round(cohortMedianMultiple * 10) / 10,
     signal,
     note,
-    dataSource,
+    dataSource: opts.dataSource,
     sampleSize: sorted.length,
+    multipleType: opts.multipleType,
+    sourceTier: opts.sourceTier,
   };
 }
 
@@ -259,6 +285,58 @@ function inferConfidence(
   if (outcomeSampleSize >= 200 && pricingSampleSize >= 400) return "high";
   if (outcomeSampleSize >= 50 && pricingSampleSize >= 120) return "medium";
   return "low";
+}
+
+function inferValuationConfidence(input: {
+  valuationContext: ValuationContext | null;
+  sourceConfidence: "low" | "medium" | "high";
+  pricingRevenueSampleSize: number;
+  pricingProxySampleSize: number;
+}): { confidence: "low" | "medium" | "high"; reason: string } {
+  if (!input.valuationContext) {
+    return {
+      confidence: "low",
+      reason: "Insufficient valuation comparables for a reliable pricing context.",
+    };
+  }
+
+  const hasRevenueMultiples = input.valuationContext.multipleType === "revenue_multiple";
+  if (
+    hasRevenueMultiples
+    && input.valuationContext.sampleSize >= 200
+    && input.sourceConfidence !== "low"
+    && input.valuationContext.sourceTier !== "C"
+  ) {
+    return {
+      confidence: "high",
+      reason: "Large revenue-multiple cohort with broad source coverage.",
+    };
+  }
+
+  if (
+    (hasRevenueMultiples && input.pricingRevenueSampleSize >= 60)
+    || (!hasRevenueMultiples && input.pricingProxySampleSize >= 120)
+  ) {
+    return {
+      confidence: "medium",
+      reason: hasRevenueMultiples
+        ? "Moderate revenue-multiple coverage; use with analyst review."
+        : "Proxy-multiple context available, but revenue-linked comps are limited.",
+    };
+  }
+
+  return {
+    confidence: "low",
+    reason: "Valuation relies on sparse or proxy-only comparable pricing evidence.",
+  };
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
 }
 
 export async function queryCohort(
@@ -304,34 +382,131 @@ export async function queryCohort(
   }));
 }
 
-export async function queryPricingCohort(
+async function queryPricingFromTrainingFeatures(
   supabase: AnySupabaseClient,
   filters: CohortFilters,
 ): Promise<PricingCohortRow[]> {
   let query = supabase
     .from("training_features_wide")
-    .select("entity_id, sector, country, pre_money_valuation, revenue_at_raise")
+    .select("entity_id, sector, country, pre_money_valuation, revenue_at_raise, amount_raised")
     .not("pre_money_valuation", "is", null)
-    .not("revenue_at_raise", "is", null)
     .gt("pre_money_valuation", 0)
-    .gt("revenue_at_raise", 0)
     .order("as_of_date", { ascending: false })
     .limit(5000);
 
   if (filters.sector) query = query.eq("sector", filters.sector);
   if (filters.country) query = query.eq("country", filters.country);
-  // stage bucket is not reliably present in the wide feature matview yet.
 
   const { data, error } = await query;
   if (error || !data) return [];
 
   return (data as Record<string, unknown>[]).map((r) => ({
-    entity_id: r.entity_id as string,
+    key: `tfw:${String(r.entity_id)}`,
     sector: r.sector as string | null,
     country: r.country as string | null,
     pre_money_valuation: r.pre_money_valuation as number | null,
     revenue_at_raise: r.revenue_at_raise as number | null,
+    amount_raised: r.amount_raised as number | null,
+    source: "training_features",
+    sourceTier: "B",
   }));
+}
+
+async function queryPricingFromFundingRounds(
+  supabase: AnySupabaseClient,
+  filters: CohortFilters,
+): Promise<PricingCohortRow[]> {
+  const { data, error } = await supabase
+    .from("funding_rounds")
+    .select("id, company_id, pre_money_valuation, amount_raised, source, companies!inner(id, sector, country, source)")
+    .not("pre_money_valuation", "is", null)
+    .gt("pre_money_valuation", 0)
+    .order("round_date", { ascending: false })
+    .limit(5000);
+
+  if (error || !data) return [];
+
+  const candidateRounds = (data as Record<string, unknown>[]).filter((row) => {
+    const company = row.companies as { sector?: string | null; country?: string | null } | null;
+    if (filters.sector && company?.sector !== filters.sector) return false;
+    if (filters.country && company?.country !== filters.country) return false;
+    return true;
+  });
+
+  const companyIds = Array.from(
+    new Set(
+      candidateRounds
+        .map((r) => r.company_id as string | null)
+        .filter((v): v is string => Boolean(v)),
+    ),
+  );
+
+  const revenueByCompany = new Map<string, number>();
+  for (const ids of chunk(companyIds, 500)) {
+    const { data: revenues } = await supabase
+      .from("crowdfunding_outcomes")
+      .select("company_id, campaign_date, revenue_at_raise")
+      .lte("label_quality_tier", 2)
+      .not("revenue_at_raise", "is", null)
+      .gt("revenue_at_raise", 0)
+      .in("company_id", ids)
+      .order("campaign_date", { ascending: false });
+
+    for (const rec of (revenues ?? []) as Array<Record<string, unknown>>) {
+      const companyId = rec.company_id as string;
+      if (!companyId || revenueByCompany.has(companyId)) continue;
+      const revenue = rec.revenue_at_raise as number | null;
+      if (revenue && revenue > 0) {
+        revenueByCompany.set(companyId, revenue);
+      }
+    }
+  }
+
+  return candidateRounds.map((r) => {
+    const company = r.companies as { source?: string | null; sector?: string | null; country?: string | null } | null;
+    const companySource = (company?.source ?? "unknown").toLowerCase();
+    let sourceTier: "A" | "B" | "C" = "C";
+    if (["sec_edgar", "sec_dera_cf", "companies_house"].includes(companySource)) {
+      sourceTier = "A";
+    } else if (["sec_form_d", "manual", "academic"].includes(companySource)) {
+      sourceTier = "B";
+    }
+
+    const companyId = r.company_id as string | null;
+    const roundSource = (r.source as string | null) ?? companySource;
+
+    return {
+      key: `round:${String(r.id)}`,
+      sector: company?.sector ?? null,
+      country: company?.country ?? null,
+      pre_money_valuation: r.pre_money_valuation as number | null,
+      revenue_at_raise: companyId ? (revenueByCompany.get(companyId) ?? null) : null,
+      amount_raised: r.amount_raised as number | null,
+      source: `funding_rounds:${roundSource}`,
+      sourceTier,
+    };
+  });
+}
+
+export async function queryPricingCohort(
+  supabase: AnySupabaseClient,
+  filters: CohortFilters,
+): Promise<PricingCohortRow[]> {
+  const [tfwRows, roundRows] = await Promise.all([
+    queryPricingFromTrainingFeatures(supabase, filters),
+    queryPricingFromFundingRounds(supabase, filters),
+  ]);
+
+  const seen = new Set<string>();
+  const out: PricingCohortRow[] = [];
+
+  for (const row of [...tfwRows, ...roundRows]) {
+    if (seen.has(row.key)) continue;
+    seen.add(row.key);
+    out.push(row);
+  }
+
+  return out;
 }
 
 export async function findComparables(
@@ -406,7 +581,13 @@ export async function findComparables(
     }
 
     const cohortStats = computeStats(outcomeRows);
-    const pricingMultiples = pricingRows
+
+    const pricingSourceBreakdown: Record<string, number> = {};
+    for (const row of pricingRows) {
+      pricingSourceBreakdown[row.source] = (pricingSourceBreakdown[row.source] ?? 0) + 1;
+    }
+
+    const pricingRevenueMultiples = pricingRows
       .map((r) => {
         if (!r.pre_money_valuation || !r.revenue_at_raise || r.revenue_at_raise <= 0) {
           return null;
@@ -414,6 +595,16 @@ export async function findComparables(
         return r.pre_money_valuation / r.revenue_at_raise;
       })
       .filter((v): v is number => v !== null && isFinite(v) && v > 0);
+
+    const pricingProxyMultiples = pricingRows
+      .map((r) => {
+        if (!r.pre_money_valuation || !r.amount_raised || r.amount_raised <= 0) {
+          return null;
+        }
+        return r.pre_money_valuation / r.amount_raised;
+      })
+      .filter((v): v is number => v !== null && isFinite(v) && v > 0);
+
     const outcomeMultiples = outcomeRows
       .map((r) => {
         if (!r.pre_money_valuation || !r.revenue_at_raise || r.revenue_at_raise <= 0) {
@@ -423,9 +614,25 @@ export async function findComparables(
       })
       .filter((v): v is number => v !== null && isFinite(v) && v > 0);
 
+    const hasTierARevenue = pricingRows.some(
+      (r) => r.sourceTier === "A" && r.revenue_at_raise !== null,
+    );
     const valuationContext =
-      buildValuationContext(pricingMultiples, input, "pricing_cohort")
-      ?? buildValuationContext(outcomeMultiples, input, "outcome_cohort");
+      buildValuationContext(pricingRevenueMultiples, input, {
+        dataSource: "pricing_cohort",
+        multipleType: "revenue_multiple",
+        sourceTier: hasTierARevenue ? "A" : "B",
+      })
+      ?? buildValuationContext(pricingProxyMultiples, input, {
+        dataSource: "pricing_cohort",
+        multipleType: "raise_proxy_multiple",
+        sourceTier: "C",
+      })
+      ?? buildValuationContext(outcomeMultiples, input, {
+        dataSource: "outcome_cohort",
+        multipleType: "revenue_multiple",
+        sourceTier: "B",
+      });
 
     const ranked = outcomeRows
       .filter((r) => r.company_name)
@@ -452,6 +659,12 @@ export async function findComparables(
     const outcomeSampleSize = outcomeRows.length;
     const pricingSampleSize = pricingRows.length;
     const sourceConfidence = inferConfidence(outcomeSampleSize, pricingSampleSize);
+    const valuationConfidenceMeta = inferValuationConfidence({
+      valuationContext,
+      sourceConfidence,
+      pricingRevenueSampleSize: pricingRevenueMultiples.length,
+      pricingProxySampleSize: pricingProxyMultiples.length,
+    });
 
     return {
       cohortStats,
@@ -461,11 +674,15 @@ export async function findComparables(
       sourceSummary: {
         outcomeSampleSize,
         pricingSampleSize,
+        pricingRevenueSampleSize: pricingRevenueMultiples.length,
+        pricingProxySampleSize: pricingProxyMultiples.length,
+        pricingSourceBreakdown,
       },
       sourceConfidence,
+      valuationConfidence: valuationConfidenceMeta.confidence,
+      valuationConfidenceReason: valuationConfidenceMeta.reason,
     };
   }
 
   return null;
 }
-

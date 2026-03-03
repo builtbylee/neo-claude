@@ -5,6 +5,8 @@ export interface ValuationScenario {
   bearMoic: number;
   baseMoic: number;
   bullMoic: number;
+  confidenceBand: "low" | "medium" | "high";
+  auditedAgainstRealized: boolean;
   notes: string[];
 }
 
@@ -14,6 +16,7 @@ interface ScenarioInput {
   revenue: number | null;
   valuationSignal: "attractive" | "fair" | "aggressive" | null;
   cohortMedianMultiple: number | null;
+  valuationConfidence: "low" | "medium" | "high" | null;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -40,11 +43,15 @@ export function computeValuationScenario(
   if (!Number.isFinite(entryMultiple) || entryMultiple <= 0) return null;
 
   const stage = (input.stageBucket ?? "").toLowerCase();
-  const dilutionRetention = stage.includes("seed")
+  const baseDilutionRetention = stage.includes("seed")
     ? 0.35
     : stage.includes("early")
       ? 0.55
       : 0.45;
+  const confidenceBand = input.valuationConfidence ?? "low";
+  const confidenceDilutionPenalty =
+    confidenceBand === "high" ? 0 : confidenceBand === "medium" ? 0.03 : 0.06;
+  const dilutionRetention = Math.max(0.2, baseDilutionRetention - confidenceDilutionPenalty);
 
   const cohortMedian = input.cohortMedianMultiple && input.cohortMedianMultiple > 0
     ? input.cohortMedianMultiple
@@ -65,6 +72,8 @@ export function computeValuationScenario(
   const notes: string[] = [
     `Dilution retention assumes ${Math.round(dilutionRetention * 100)}% ownership retained at exit.`,
     `Scenario exits are benchmarked to ${cohortMedian ? "cohort median multiples" : "default market multiple priors"}.`,
+    `Valuation confidence: ${confidenceBand}.`,
+    "Scenario outputs are model estimates and should be validated against new realized outcomes each quarter.",
   ];
   if (input.valuationSignal === "aggressive") {
     notes.push("Aggressive entry pricing penalty applied.");
@@ -80,7 +89,8 @@ export function computeValuationScenario(
     bearMoic: round2(bearMoic),
     baseMoic: round2(baseMoic),
     bullMoic: round2(bullMoic),
+    confidenceBand,
+    auditedAgainstRealized: false,
     notes,
   };
 }
-

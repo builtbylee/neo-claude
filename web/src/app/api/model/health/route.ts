@@ -5,7 +5,12 @@ import { resolveRouteContext } from "@/lib/auth/request-context";
 type JsonObject = Record<string, unknown>;
 
 function asNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 export async function GET(request: NextRequest) {
@@ -13,7 +18,13 @@ export async function GET(request: NextRequest) {
   if (context instanceof NextResponse) return context;
   const { supabase } = context;
 
-  const [{ data: runs }, { data: versions }, { data: calibrations }] = await Promise.all([
+  const [
+    { data: runs },
+    { data: versions },
+    { data: calibrations },
+    { data: segments },
+    { data: valuationAudits },
+  ] = await Promise.all([
     supabase
       .from("backtest_runs")
       .select("id, run_date, metrics, pass_fail, all_passed")
@@ -29,6 +40,17 @@ export async function GET(request: NextRequest) {
       .select("checked_at, ece, status")
       .order("checked_at", { ascending: false })
       .limit(1),
+    supabase
+      .from("segment_model_evidence")
+      .select("segment_key, sample_size, survival_auc, calibration_ece, release_gate_open, last_backtest_date")
+      .order("segment_key", { ascending: true }),
+    supabase
+      .from("valuation_scenario_audits")
+      .select("base_moic, realized_moic")
+      .not("base_moic", "is", null)
+      .not("realized_moic", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1000),
   ]);
 
   const latestRun = runs?.[0] ?? null;
@@ -56,6 +78,24 @@ export async function GET(request: NextRequest) {
     || latestCalibration?.status === "critical"
     || (calibrationEce !== null && calibrationEce > 0.1);
 
+  let valuationAuditCoverage = 0;
+  let valuationMeanAbsError: number | null = null;
+  if (valuationAudits && valuationAudits.length > 0) {
+    valuationAuditCoverage = valuationAudits.length;
+    const absErrors = valuationAudits
+      .map((row) => {
+        const predicted = asNumber((row as JsonObject).base_moic);
+        const realized = asNumber((row as JsonObject).realized_moic);
+        if (predicted === null || realized === null) return null;
+        return Math.abs(predicted - realized);
+      })
+      .filter((v): v is number => v !== null);
+    if (absErrors.length > 0) {
+      valuationMeanAbsError =
+        Math.round((absErrors.reduce((a, b) => a + b, 0) / absErrors.length) * 100) / 100;
+    }
+  }
+
   return NextResponse.json({
     latestBacktest: latestRun
       ? {
@@ -80,6 +120,32 @@ export async function GET(request: NextRequest) {
       releaseGateOpen,
       retrainRecommended,
     },
+    segmentEvidence: (segments ?? []).map((row) => {
+      const segment = row as JsonObject;
+      const sampleSize = asNumber(segment.sample_size) ?? 0;
+      const survival = asNumber(segment.survival_auc);
+      const ece = asNumber(segment.calibration_ece);
+      const release = Boolean(segment.release_gate_open);
+      const evidenceOk =
+        sampleSize >= 200
+        && release
+        && survival !== null
+        && survival >= 0.65
+        && ece !== null
+        && ece <= 0.10;
+      return {
+        segmentKey: String(segment.segment_key ?? ""),
+        sampleSize,
+        survivalAuc: survival,
+        calibrationEce: ece,
+        releaseGateOpen: release,
+        lastBacktestDate: (segment.last_backtest_date as string | null) ?? null,
+        evidenceOk,
+      };
+    }),
+    valuationAudit: {
+      realizedCoverage: valuationAuditCoverage,
+      meanAbsoluteError: valuationMeanAbsError,
+    },
   });
 }
-

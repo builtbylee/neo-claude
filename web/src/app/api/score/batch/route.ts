@@ -92,6 +92,7 @@ export async function POST(request: NextRequest) {
       modelScore: rubric.overallScore,
       confidenceRange: rubric.confidenceRange,
       isQuickScore: true,
+      enforceReliabilityGates: false,
     });
     const rec = classify(rubric.overallScore, rubric.confidenceRange, gates);
 

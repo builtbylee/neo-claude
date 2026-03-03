@@ -101,8 +101,29 @@ interface ScoreResultProps {
       bearMoic: number;
       baseMoic: number;
       bullMoic: number;
+      confidenceBand: "low" | "medium" | "high";
+      auditedAgainstRealized: boolean;
       notes: string[];
     } | null;
+    valuationConfidence: "low" | "medium" | "high";
+    valuationConfidenceReason: string;
+    segmentEvidence: {
+      segmentKey: string;
+      sampleSize: number;
+      survivalAuc: number | null;
+      calibrationEce: number | null;
+      releaseGateOpen: boolean;
+      evidenceOk: boolean;
+      lastBacktestDate: string | null;
+    } | null;
+    sanctions: {
+      checked: boolean;
+      matched: boolean;
+      riskLevel: "clear" | "potential_match";
+      matchSource: string | null;
+      matchName: string | null;
+      reason: string;
+    };
     comparables: {
       cohortStats: {
         sampleSize: number;
@@ -127,12 +148,19 @@ interface ScoreResultProps {
         note: string;
         dataSource: "pricing_cohort" | "outcome_cohort";
         sampleSize: number;
+        multipleType: "revenue_multiple" | "raise_proxy_multiple";
+        sourceTier: "A" | "B" | "C";
       } | null;
       sourceSummary: {
         outcomeSampleSize: number;
         pricingSampleSize: number;
+        pricingRevenueSampleSize: number;
+        pricingProxySampleSize: number;
+        pricingSourceBreakdown: Record<string, number>;
       };
       sourceConfidence: "low" | "medium" | "high";
+      valuationConfidence: "low" | "medium" | "high";
+      valuationConfidenceReason: string;
       nearestDeals: Array<{
         name: string;
         sector: string | null;
@@ -283,6 +311,52 @@ export default function ScoreResult({ result }: ScoreResultProps) {
           <p className="text-sm text-neutral-300">
             {result.assessmentWarning}
           </p>
+        </div>
+      )}
+
+      {(result.segmentEvidence || result.sanctions.checked) && (
+        <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+          <h3 className="text-sm font-semibold text-neutral-300 mb-3">
+            Reliability & Compliance
+          </h3>
+          {result.segmentEvidence && (
+            <div className="text-xs text-neutral-400 mb-3">
+              Segment {result.segmentEvidence.segmentKey}: n={result.segmentEvidence.sampleSize}
+              {" · "}AUC {result.segmentEvidence.survivalAuc ?? "n/a"}
+              {" · "}ECE {result.segmentEvidence.calibrationEce ?? "n/a"}
+              {" · "}
+              <span className={result.segmentEvidence.evidenceOk ? "text-green-300" : "text-amber-300"}>
+                {result.segmentEvidence.evidenceOk ? "evidence strong" : "evidence weak"}
+              </span>
+            </div>
+          )}
+          <div className="text-xs text-neutral-400 mb-3">
+            Valuation confidence:{" "}
+            <span
+              className={
+                result.valuationConfidence === "high"
+                  ? "text-green-300"
+                  : result.valuationConfidence === "medium"
+                    ? "text-yellow-300"
+                    : "text-amber-300"
+              }
+            >
+              {result.valuationConfidence}
+            </span>
+            {" · "}
+            {result.valuationConfidenceReason}
+          </div>
+          {result.sanctions.checked && (
+            <div className="text-xs text-neutral-400">
+              Sanctions:{" "}
+              <span className={result.sanctions.matched ? "text-red-400" : "text-green-300"}>
+                {result.sanctions.matched ? "potential match" : "clear"}
+              </span>
+              {result.sanctions.matchSource ? ` (${result.sanctions.matchSource})` : ""}
+              {" · "}
+              {result.sanctions.reason}
+            </div>
+          )}
         </div>
       )}
 
@@ -560,7 +634,12 @@ export default function ScoreResult({ result }: ScoreResultProps) {
             outcome n={result.comparables.sourceSummary.outcomeSampleSize.toLocaleString()}
             {" · "}
             pricing n={result.comparables.sourceSummary.pricingSampleSize.toLocaleString()}
+            {" · "}
+            valuation {result.comparables.valuationConfidence}
           </p>
+          <div className="text-xs text-neutral-500 mb-3">
+            {result.comparables.valuationConfidenceReason}
+          </div>
 
           {/* Cohort base rates */}
           <div className="grid grid-cols-3 gap-4 mb-4">
@@ -672,6 +751,10 @@ export default function ScoreResult({ result }: ScoreResultProps) {
                 {" "}
                 (source: {result.comparables.valuationContext.dataSource.replace(/_/g, " ")},
                 n={result.comparables.valuationContext.sampleSize})
+                {" · "}
+                type: {result.comparables.valuationContext.multipleType.replace(/_/g, " ")}
+                {" · "}
+                tier {result.comparables.valuationContext.sourceTier}
               </p>
             </div>
           )}
@@ -700,11 +783,23 @@ export default function ScoreResult({ result }: ScoreResultProps) {
                   Entry multiple {result.valuationScenario.entryMultiple.toFixed(1)}x
                   {" · "}
                   retained ownership {Math.round(result.valuationScenario.dilutionRetention * 100)}%
+                  {" · "}
+                  confidence {result.valuationScenario.confidenceBand}
                 </div>
                 {result.valuationScenario.notes.map((note, idx) => (
                   <div key={`${note}-${idx}`}>{note}</div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {Object.keys(result.comparables.sourceSummary.pricingSourceBreakdown).length > 0 && (
+            <div className="text-xs text-neutral-500 mb-4">
+              Sources:{" "}
+              {Object.entries(result.comparables.sourceSummary.pricingSourceBreakdown)
+                .slice(0, 6)
+                .map(([k, v]) => `${k}(${v})`)
+                .join(", ")}
             </div>
           )}
 

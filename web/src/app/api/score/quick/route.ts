@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { buildProfile, scoreText, type ExtractedFacts } from "@/lib/claude/text-scorer";
 import { generateMemo, identifyMissingFields, type ICMemo, type MissingField } from "@/lib/claude/memo-generator";
 import { resolveRouteContext } from "@/lib/auth/request-context";
+import { screenNameAgainstSanctions } from "@/lib/compliance/sanctions";
 import {
   findCompany,
   loadFeatures,
@@ -17,6 +18,9 @@ import {
   loadFundingHistory,
   loadFeatureProvenance,
   loadRegulatoryData,
+  loadSegmentEvidence,
+  insertValuationScenarioAudit,
+  insertSanctionsScreening,
   type DealTermsRow,
   type FundingRoundRow,
 } from "@/lib/db/supabase";
@@ -28,6 +32,7 @@ import { findComparables, type ComparablesResult } from "@/lib/scoring/comparabl
 import { checkGates, type GateCheckInput } from "@/lib/scoring/gates";
 import { classify } from "@/lib/scoring/recommendation";
 import { type RubricInput, computeRubric } from "@/lib/scoring/rubric";
+import { deriveSegmentKey } from "@/lib/scoring/segments";
 import { computeValuationScenario } from "@/lib/scoring/valuation";
 import modelJson from "@/../public/model/model.json";
 
@@ -92,8 +97,29 @@ interface QuickScoreResponse {
     bearMoic: number;
     baseMoic: number;
     bullMoic: number;
+    confidenceBand: "low" | "medium" | "high";
+    auditedAgainstRealized: boolean;
     notes: string[];
   } | null;
+  valuationConfidence: "low" | "medium" | "high";
+  valuationConfidenceReason: string;
+  segmentEvidence: {
+    segmentKey: string;
+    sampleSize: number;
+    survivalAuc: number | null;
+    calibrationEce: number | null;
+    releaseGateOpen: boolean;
+    evidenceOk: boolean;
+    lastBacktestDate: string | null;
+  } | null;
+  sanctions: {
+    checked: boolean;
+    matched: boolean;
+    riskLevel: "clear" | "potential_match";
+    matchSource: string | null;
+    matchName: string | null;
+    reason: string;
+  };
   regulatoryStatus: {
     companyStatus: string | null;
     companyNumber: string | null;
@@ -125,6 +151,15 @@ export async function POST(request: NextRequest) {
   let fundingHistory: FundingRoundRow[] = [];
   let provenance: QuickScoreResponse["provenance"] = null;
   let regulatoryStatus: { companyStatus: string | null; companyNumber: string | null } | null = null;
+  let segmentEvidence: QuickScoreResponse["segmentEvidence"] = null;
+  let sanctions: QuickScoreResponse["sanctions"] = {
+    checked: false,
+    matched: false,
+    riskLevel: "clear",
+    matchSource: null,
+    matchName: null,
+    reason: "Sanctions check not run.",
+  };
 
   {
     company = await findCompany(supabase, body.companyName);
@@ -329,6 +364,54 @@ export async function POST(request: NextRequest) {
     // Model inference failed — use baseline
   }
 
+  // Step 3d: Segment evidence + sanctions screen
+  const segmentKey = deriveSegmentKey(
+    (features.country as string) ?? company?.country ?? null,
+    stageBucket,
+  );
+  try {
+    const evidence = await loadSegmentEvidence(supabase, segmentKey);
+    if (evidence) {
+      const evidenceOk =
+        evidence.sample_size >= 200
+        && evidence.release_gate_open
+        && evidence.survival_auc !== null
+        && evidence.survival_auc >= 0.65
+        && evidence.calibration_ece !== null
+        && evidence.calibration_ece <= 0.10;
+      segmentEvidence = {
+        segmentKey: evidence.segment_key,
+        sampleSize: evidence.sample_size,
+        survivalAuc: evidence.survival_auc,
+        calibrationEce: evidence.calibration_ece,
+        releaseGateOpen: evidence.release_gate_open,
+        evidenceOk,
+        lastBacktestDate: evidence.last_backtest_date,
+      };
+    }
+  } catch {
+    // Segment evidence unavailable — gate will abstain
+  }
+
+  try {
+    sanctions = await screenNameAgainstSanctions(body.companyName);
+    await insertSanctionsScreening(supabase, {
+      screened_name: body.companyName.trim(),
+      normalized_name: body.companyName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .replace(/\\s+/g, " ")
+        .trim(),
+      matched: sanctions.matched,
+      match_source: sanctions.matchSource,
+      match_name: sanctions.matchName,
+      risk_level: sanctions.riskLevel,
+      details: { reason: sanctions.reason },
+    });
+  } catch {
+    // Screening errors should not break scoring
+  }
+
   // Step 4: Comparables — used for valuation context and final output
   const effectiveRevenue = (features.revenue_at_raise as number) ?? body.revenue ?? null;
   let comparables: ComparablesResult | null = null;
@@ -388,12 +471,17 @@ export async function POST(request: NextRequest) {
   };
 
   const rubricResult = computeRubric(rubricInput);
+  const valuationConfidence = comparables?.valuationConfidence ?? "low";
+  const valuationConfidenceReason =
+    comparables?.valuationConfidenceReason
+    ?? "No valuation context was available from current comparables.";
   const valuationScenario = computeValuationScenario({
     stageBucket,
     preMoneyValuation: dealTerms?.pre_money_valuation ?? null,
     revenue: effectiveRevenue,
     valuationSignal: comparables?.valuationContext?.signal ?? null,
     cohortMedianMultiple: comparables?.valuationContext?.cohortMedianMultiple ?? null,
+    valuationConfidence,
   });
 
   // Step 6: Abstention gates
@@ -402,6 +490,17 @@ export async function POST(request: NextRequest) {
     modelScore: rubricResult.overallScore,
     confidenceRange: rubricResult.confidenceRange,
     isQuickScore: true,
+    valuationConfidence,
+    segmentEvidence: segmentEvidence
+      ? {
+          segmentKey: segmentEvidence.segmentKey,
+          sampleSize: segmentEvidence.sampleSize,
+          survivalAuc: segmentEvidence.survivalAuc,
+          calibrationEce: segmentEvidence.calibrationEce,
+          releaseGateOpen: segmentEvidence.releaseGateOpen,
+        }
+      : null,
+    sanctionsMatch: sanctions.matched,
   };
 
   const gates = checkGates(gateInput);
@@ -471,6 +570,27 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  try {
+    await insertValuationScenarioAudit(supabase, {
+      company_id: company?.id ?? null,
+      entity_id: company?.entity_id ?? null,
+      evaluation_type: "quick",
+      segment_key: segmentKey,
+      recommendation_class: recommendation.class,
+      score: rubricResult.overallScore,
+      data_completeness: rubricResult.dataCompleteness,
+      valuation_confidence: valuationConfidence,
+      valuation_confidence_reason: valuationConfidenceReason,
+      valuation_source_summary: comparables?.sourceSummary ?? null,
+      entry_multiple: valuationScenario?.entryMultiple ?? null,
+      bear_moic: valuationScenario?.bearMoic ?? null,
+      base_moic: valuationScenario?.baseMoic ?? null,
+      bull_moic: valuationScenario?.bullMoic ?? null,
+    });
+  } catch {
+    // Audit logging failures should not block scoring
+  }
+
   const response: QuickScoreResponse = {
     score: rubricResult.overallScore,
     confidenceRange: rubricResult.confidenceRange,
@@ -517,6 +637,10 @@ export async function POST(request: NextRequest) {
     },
     provenance,
     valuationScenario,
+    valuationConfidence,
+    valuationConfidenceReason,
+    segmentEvidence,
+    sanctions,
     regulatoryStatus,
   };
 

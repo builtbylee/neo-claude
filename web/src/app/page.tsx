@@ -108,8 +108,29 @@ type ScoreResponse = {
     bearMoic: number;
     baseMoic: number;
     bullMoic: number;
+    confidenceBand: "low" | "medium" | "high";
+    auditedAgainstRealized: boolean;
     notes: string[];
   } | null;
+  valuationConfidence: "low" | "medium" | "high";
+  valuationConfidenceReason: string;
+  segmentEvidence: {
+    segmentKey: string;
+    sampleSize: number;
+    survivalAuc: number | null;
+    calibrationEce: number | null;
+    releaseGateOpen: boolean;
+    evidenceOk: boolean;
+    lastBacktestDate: string | null;
+  } | null;
+  sanctions: {
+    checked: boolean;
+    matched: boolean;
+    riskLevel: "clear" | "potential_match";
+    matchSource: string | null;
+    matchName: string | null;
+    reason: string;
+  };
   comparables: {
     cohortStats: {
       sampleSize: number;
@@ -134,12 +155,19 @@ type ScoreResponse = {
       note: string;
       dataSource: "pricing_cohort" | "outcome_cohort";
       sampleSize: number;
+      multipleType: "revenue_multiple" | "raise_proxy_multiple";
+      sourceTier: "A" | "B" | "C";
     } | null;
     sourceSummary: {
       outcomeSampleSize: number;
       pricingSampleSize: number;
+      pricingRevenueSampleSize: number;
+      pricingProxySampleSize: number;
+      pricingSourceBreakdown: Record<string, number>;
     };
     sourceConfidence: "low" | "medium" | "high";
+    valuationConfidence: "low" | "medium" | "high";
+    valuationConfidenceReason: string;
     nearestDeals: Array<{
       name: string;
       sector: string | null;

@@ -19,6 +19,15 @@ export interface GateCheckInput {
   modelScore: number;
   confidenceRange: number;
   isQuickScore: boolean;
+  enforceReliabilityGates?: boolean;
+  valuationConfidence?: "high" | "medium" | "low" | null;
+  segmentEvidence?: {
+    segmentKey: string;
+    sampleSize: number;
+    survivalAuc: number | null;
+    calibrationEce: number | null;
+    releaseGateOpen: boolean;
+  } | null;
   // Kill criteria
   directorDisqualified?: boolean;
   underAdministration?: boolean;
@@ -40,6 +49,7 @@ function normalizedEntropy(p: number): number {
 export function checkGates(input: GateCheckInput): GateResult[] {
   const results: GateResult[] = [];
   const minCompleteness = input.isQuickScore ? 0.40 : 0.60;
+  const enforceReliabilityGates = input.enforceReliabilityGates ?? true;
 
   // Gate 1: Data completeness
   results.push({
@@ -68,6 +78,53 @@ export function checkGates(input: GateCheckInput): GateResult[] {
       ? "Model can distinguish this deal from base rate"
       : "Model cannot reliably distinguish from base rate",
   });
+
+  // Gate 3: Segment evidence quality (US/UK x stage)
+  if (enforceReliabilityGates) {
+    if (input.segmentEvidence) {
+      const evidence = input.segmentEvidence;
+      const evidencePassed =
+        evidence.sampleSize >= 200
+        && evidence.releaseGateOpen
+        && evidence.survivalAuc !== null
+        && evidence.survivalAuc >= 0.65
+        && evidence.calibrationEce !== null
+        && evidence.calibrationEce <= 0.10;
+      results.push({
+        name: "Segment Evidence",
+        passed: evidencePassed,
+        value: `${evidence.segmentKey} n=${evidence.sampleSize}`,
+        threshold: "n>=200, AUC>=0.65, ECE<=0.10, release gate open",
+        action: evidencePassed ? "pass" : "abstain",
+        reason: evidencePassed
+          ? "Sufficient out-of-sample evidence for this segment"
+          : "Segment evidence is insufficient for reliable autonomous recommendation",
+      });
+    } else {
+      results.push({
+        name: "Segment Evidence",
+        passed: false,
+        value: null,
+        threshold: "segment evidence required",
+        action: "abstain",
+        reason: "No segment-specific backtest evidence available",
+      });
+    }
+
+    // Gate 4: Valuation confidence quality
+    const valuationConfidence = input.valuationConfidence ?? "low";
+    const valuationPassed = valuationConfidence !== "low";
+    results.push({
+      name: "Valuation Confidence",
+      passed: valuationPassed,
+      value: valuationConfidence,
+      threshold: "medium or high",
+      action: valuationPassed ? "pass" : "abstain",
+      reason: valuationPassed
+        ? "Valuation context has sufficient coverage"
+        : "Valuation context is low-confidence; escalate to deep diligence",
+    });
+  }
 
   // Kill criteria
   if (input.directorDisqualified) {

@@ -76,6 +76,19 @@ type ModelHealth = {
     releaseGateOpen: boolean;
     retrainRecommended: boolean;
   };
+  segmentEvidence: Array<{
+    segmentKey: string;
+    sampleSize: number;
+    survivalAuc: number | null;
+    calibrationEce: number | null;
+    releaseGateOpen: boolean;
+    lastBacktestDate: string | null;
+    evidenceOk: boolean;
+  }>;
+  valuationAudit: {
+    realizedCoverage: number;
+    meanAbsoluteError: number | null;
+  };
 };
 
 export default function AnalystWorkbench({
@@ -347,6 +360,35 @@ export default function AnalystWorkbench({
             >
               Retrain {modelHealth.checks.retrainRecommended ? "Recommended" : "Not Required"}
             </span>
+          </div>
+          <div className="mt-4 border-t border-neutral-800 pt-3">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral-500">
+              Segment Evidence
+            </div>
+            <div className="space-y-1 text-xs text-neutral-400">
+              {modelHealth.segmentEvidence.length === 0 && (
+                <div>No segment evidence available yet.</div>
+              )}
+              {modelHealth.segmentEvidence.map((segment) => (
+                <div key={segment.segmentKey} className="flex items-center justify-between gap-2">
+                  <span>{segment.segmentKey}</span>
+                  <span>
+                    n={segment.sampleSize}
+                    {" · "}AUC {segment.survivalAuc ?? "n/a"}
+                    {" · "}ECE {segment.calibrationEce ?? "n/a"}
+                    {" · "}
+                    <span className={segment.evidenceOk ? "text-green-300" : "text-amber-300"}>
+                      {segment.evidenceOk ? "usable" : "weak"}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 text-xs text-neutral-500">
+              Valuation audits with realized outcomes: {modelHealth.valuationAudit.realizedCoverage}
+              {" · "}
+              MAE: {modelHealth.valuationAudit.meanAbsoluteError ?? "n/a"}
+            </div>
           </div>
         </div>
       )}

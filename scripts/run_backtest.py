@@ -474,6 +474,7 @@ def main(
             }
 
         baselines_dict = {"per_window": [_sanitize_dict(w) for w in window_results]}
+        total_labeled_samples = sum(int(w.get("labeled", 0) or 0) for w in window_results)
 
         features_active = list(
             trained.feature_importances.keys()
@@ -532,6 +533,51 @@ def main(
             )
         except Exception:  # noqa: BLE001
             logger.warning("model_health_snapshot_insert_failed")
+
+        # Upsert segment-level evidence for quick-score gating.
+        try:
+            execute_query(
+                conn,
+                """
+                INSERT INTO segment_model_evidence (
+                    segment_key,
+                    sample_size,
+                    survival_auc,
+                    calibration_ece,
+                    release_gate_open,
+                    last_backtest_run_id,
+                    last_backtest_date,
+                    source_coverage,
+                    notes,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, now())
+                ON CONFLICT (segment_key) DO UPDATE
+                SET
+                    sample_size = EXCLUDED.sample_size,
+                    survival_auc = EXCLUDED.survival_auc,
+                    calibration_ece = EXCLUDED.calibration_ece,
+                    release_gate_open = EXCLUDED.release_gate_open,
+                    last_backtest_run_id = EXCLUDED.last_backtest_run_id,
+                    last_backtest_date = EXCLUDED.last_backtest_date,
+                    source_coverage = EXCLUDED.source_coverage,
+                    notes = EXCLUDED.notes,
+                    updated_at = now()
+                """,
+                (
+                    model_family,
+                    total_labeled_samples,
+                    None if math.isnan(avg_model_auc) else avg_model_auc,
+                    None if math.isnan(avg_model_ece) else avg_model_ece,
+                    all_passed,
+                    run_id,
+                    date.today(),
+                    '{"pipeline":"walk_forward","data":"free_public_sources"}',
+                    f"Auto-updated by run_backtest for {model_family}",
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("segment_model_evidence_upsert_failed")
 
         conn.commit()
         logger.info(
