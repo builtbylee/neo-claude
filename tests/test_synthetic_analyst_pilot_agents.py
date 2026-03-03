@@ -20,6 +20,7 @@ from run_synthetic_analyst_pilot_agents import (  # noqa: E402
     _aggregate,
     _ask_persona_async,
     _fan_out_agents,
+    _load_cycle_items_by_ids,
     _parse_json_response,
     _upsert_decision,
 )
@@ -432,3 +433,53 @@ class TestPartialAgentFailure:
         assert bal.errors == 0
         assert aggr.decisions[0].recommendation_class == "invest"
         assert aggr.errors == 0
+
+
+# ---------------------------------------------------------------------------
+# Locked item set loading
+# ---------------------------------------------------------------------------
+
+
+class TestLoadCycleItemsByIds:
+    def test_returns_items_in_input_order(self) -> None:
+        """Items should be returned in the same order as the input IDs."""
+        conn = _mock_conn()
+        cursor = conn.cursor.return_value.__enter__.return_value
+        # DB returns rows in a different order than requested
+        cursor.description = True
+        cursor.fetchall.return_value = [
+            {"shadow_cycle_item_id": "id-b", "company_name": "B"},
+            {"shadow_cycle_item_id": "id-a", "company_name": "A"},
+        ]
+
+        result = _load_cycle_items_by_ids(conn, "cycle-1", ["id-a", "id-b"])
+        assert result[0]["shadow_cycle_item_id"] == "id-a"
+        assert result[1]["shadow_cycle_item_id"] == "id-b"
+
+    def test_filters_missing_ids(self) -> None:
+        """If DB returns fewer rows than requested, missing IDs are dropped."""
+        conn = _mock_conn()
+        cursor = conn.cursor.return_value.__enter__.return_value
+        cursor.description = True
+        cursor.fetchall.return_value = [
+            {"shadow_cycle_item_id": "id-a", "company_name": "A"},
+        ]
+
+        result = _load_cycle_items_by_ids(conn, "cycle-1", ["id-a", "id-missing"])
+        assert len(result) == 1
+        assert result[0]["shadow_cycle_item_id"] == "id-a"
+
+    def test_empty_ids_returns_empty(self) -> None:
+        conn = _mock_conn()
+        result = _load_cycle_items_by_ids(conn, "cycle-1", [])
+        assert result == []
+
+    def test_query_includes_in_clause(self) -> None:
+        conn = _mock_conn()
+        cursor = conn.cursor.return_value.__enter__.return_value
+        cursor.description = True
+        cursor.fetchall.return_value = []
+
+        _load_cycle_items_by_ids(conn, "cycle-1", ["id-x"])
+        query = cursor.execute.call_args[0][0]
+        assert "IN (" in query

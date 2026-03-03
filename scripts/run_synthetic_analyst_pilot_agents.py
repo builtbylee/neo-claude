@@ -368,6 +368,117 @@ def _load_cycle_items(conn, cycle_id: str, max_items: int) -> list[dict[str, Any
     )
 
 
+def _load_cycle_items_by_ids(
+    conn, cycle_id: str, item_ids: list[str]
+) -> list[dict[str, Any]]:
+    """Load specific shadow-cycle items by ID, preserving the input order."""
+    if not item_ids:
+        return []
+    placeholders = ", ".join(["%s::uuid"] * len(item_ids))
+    rows = execute_query(
+        conn,
+        f"""
+        WITH latest_eval AS (
+          SELECT DISTINCT ON (company_name)
+            id::text,
+            company_name,
+            recommendation_class,
+            quantitative_score,
+            confidence_level,
+            category_scores,
+            risk_flags,
+            missing_data_fields,
+            valuation_analysis,
+            return_distribution,
+            created_at
+          FROM evaluations
+          ORDER BY company_name, created_at DESC
+        ),
+        latest_cf AS (
+          SELECT DISTINCT ON (lower(c.name))
+            lower(c.name) AS name_key,
+            co.platform AS cf_platform,
+            co.campaign_date,
+            co.funding_target,
+            co.amount_raised,
+            co.pre_money_valuation,
+            co.equity_offered,
+            co.investor_count AS cf_investor_count,
+            co.had_revenue,
+            co.revenue_at_raise,
+            co.stage_bucket
+          FROM crowdfunding_outcomes co
+          JOIN companies c ON c.id = co.company_id
+          ORDER BY lower(c.name), co.campaign_date DESC NULLS LAST
+        ),
+        latest_round AS (
+          SELECT DISTINCT ON (lower(c.name))
+            lower(c.name) AS name_key,
+            fr.round_date,
+            fr.round_type,
+            fr.instrument_type,
+            fr.amount_raised AS round_amount_raised,
+            fr.pre_money_valuation AS round_pre_money_valuation,
+            fr.investor_count AS round_investor_count,
+            fr.qualified_institutional,
+            fr.eis_seis_eligible,
+            fr.qsbs_eligible
+          FROM funding_rounds fr
+          JOIN companies c ON c.id = fr.company_id
+          ORDER BY lower(c.name), fr.round_date DESC NULLS LAST
+        )
+        SELECT
+          sci.id::text AS shadow_cycle_item_id,
+          sci.entity_id::text AS entity_id,
+          sci.company_name,
+          sci.sector,
+          sci.country,
+          sci.source,
+          sci.source_ref,
+          COALESCE(e.id::text, le.id) AS evaluation_id,
+          COALESCE(e.recommendation_class, le.recommendation_class) AS model_recommendation,
+          COALESCE(e.quantitative_score, le.quantitative_score) AS score,
+          COALESCE(e.confidence_level, le.confidence_level) AS confidence_level,
+          COALESCE(e.category_scores, le.category_scores) AS category_scores,
+          COALESCE(e.risk_flags, le.risk_flags) AS risk_flags,
+          COALESCE(e.missing_data_fields, le.missing_data_fields) AS missing_data_fields,
+          COALESCE(e.valuation_analysis, le.valuation_analysis) AS valuation_analysis,
+          COALESCE(e.return_distribution, le.return_distribution) AS return_distribution,
+          lcf.cf_platform,
+          lcf.campaign_date,
+          lcf.funding_target,
+          lcf.amount_raised,
+          lcf.pre_money_valuation,
+          lcf.equity_offered,
+          lcf.cf_investor_count,
+          lcf.had_revenue,
+          lcf.revenue_at_raise,
+          lcf.stage_bucket,
+          lr.round_date,
+          lr.round_type,
+          lr.instrument_type,
+          lr.round_amount_raised,
+          lr.round_pre_money_valuation,
+          lr.round_investor_count,
+          lr.qualified_institutional,
+          lr.eis_seis_eligible,
+          lr.qsbs_eligible
+        FROM shadow_cycle_items sci
+        LEFT JOIN evaluations e ON e.id = sci.evaluation_id
+        LEFT JOIN latest_eval le ON lower(le.company_name) = lower(sci.company_name)
+        LEFT JOIN latest_cf lcf ON lower(sci.company_name) = lcf.name_key
+        LEFT JOIN latest_round lr ON lower(sci.company_name) = lr.name_key
+        WHERE sci.cycle_id = %s::uuid
+          AND sci.id IN ({placeholders})
+        ORDER BY sci.created_at ASC
+        """,
+        (cycle_id, *item_ids),
+    )
+    # Reorder to match input file order for full determinism
+    by_id = {r["shadow_cycle_item_id"]: r for r in rows}
+    return [by_id[iid] for iid in item_ids if iid in by_id]
+
+
 def _upsert_decision(conn, run_id: str, decision: AgentDecision) -> None:
     """Idempotent upsert on (run_id, shadow_cycle_item_id, analyst_profile)."""
     execute_query(
@@ -685,6 +796,9 @@ def main(
     max_items: int = typer.Option(20, help="Max shadow-cycle deals to evaluate."),
     run_name: str | None = typer.Option(None, help="Custom run name."),
     output_dir: str = typer.Option("reports/pilots", help="Directory for pilot reports."),
+    item_ids_file: str | None = typer.Option(
+        None, help="Path to file with one shadow_cycle_item_id per line (locks item set)."
+    ),
 ) -> None:
     settings = get_settings()
     if not settings.anthropic_api_key:
@@ -694,7 +808,25 @@ def main(
 
     try:
         cycle = _load_cycle(conn, cycle_id)
-        items = _load_cycle_items(conn, cycle["id"], max_items)
+
+        if item_ids_file:
+            ids_path = Path(item_ids_file)
+            if not ids_path.exists():
+                raise typer.BadParameter(f"Item IDs file not found: {ids_path}")
+            locked_ids = [
+                line.strip() for line in ids_path.read_text().splitlines() if line.strip()
+            ]
+            if not locked_ids:
+                raise typer.BadParameter("Item IDs file is empty.")
+            items = _load_cycle_items_by_ids(conn, cycle["id"], locked_ids)
+            if len(items) != len(locked_ids):
+                missing = set(locked_ids) - {i["shadow_cycle_item_id"] for i in items}
+                raise typer.BadParameter(
+                    f"Missing {len(missing)} item(s) in cycle: {missing}"
+                )
+        else:
+            items = _load_cycle_items(conn, cycle["id"], max_items)
+
         if not items:
             raise typer.BadParameter("No shadow-cycle items found for pilot run.")
 
