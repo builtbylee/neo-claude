@@ -1,0 +1,74 @@
+name: Ops Alerts
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  alerts:
+    runs-on: ubuntu-latest
+    env:
+      SL_DATABASE_URL: ${{ secrets.SL_DATABASE_URL }}
+      SL_RESEND_API_KEY: ${{ secrets.SL_RESEND_API_KEY }}
+      SL_ALERT_EMAIL_TO: ${{ secrets.SL_ALERT_EMAIL_TO }}
+      SL_ALERT_EMAIL_FROM: ${{ secrets.SL_ALERT_EMAIL_FROM }}
+    steps:
+      - name: Preflight secrets
+        id: preflight
+        run: |
+          if [ -z "${SL_DATABASE_URL}" ]; then
+            echo "::warning::Missing SL_DATABASE_URL; skipping Ops Alerts."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.preflight.outputs.should_run == 'true'
+
+      - name: Set up Python
+        if: steps.preflight.outputs.should_run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        if: steps.preflight.outputs.should_run == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run guardrail checks
+        if: steps.preflight.outputs.should_run == 'true'
+        id: guardrails
+        continue-on-error: true
+        run: python scripts/run_ops_alert_checks.py --enqueue-alerts --fail-on-alerts --output-file /tmp/ops_alerts.json
+
+      - name: Deliver queued alert email digest
+        if: steps.preflight.outputs.should_run == 'true'
+        run: python scripts/send_alert_digest.py || true
+
+      - name: Create or update ops alert issue
+        if: steps.preflight.outputs.should_run == 'true' && steps.guardrails.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="StartupLens Ops Alert"
+          BODY="$(cat /tmp/ops_alerts.json)"
+          ISSUE_NUM=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$ISSUE_NUM" ]; then
+            gh issue comment "$ISSUE_NUM" --body "\n## $(date -u +'%Y-%m-%d %H:%M UTC')\n\n\`\`\`json\n$BODY\n\`\`\`"
+          else
+            gh issue create --title "$TITLE" --label "ops-alert" --body "\`\`\`json\n$BODY\n\`\`\`"
+          fi
+
+      - name: Fail workflow on active alerts
+        if: steps.preflight.outputs.should_run == 'true' && steps.guardrails.outcome == 'failure'
+        run: |
+          echo "Guardrail breaches detected."
+          exit 1

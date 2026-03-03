@@ -1,15 +1,12 @@
-name: Weekly Evidence Refresh
+name: Threshold Policy
 
 on:
   pull_request:
   push:
     branches: [main]
-  schedule:
-    - cron: '15 5 * * 1'
-  workflow_dispatch:
 
 jobs:
-  evidence:
+  threshold-policy:
     runs-on: ubuntu-latest
     env:
       SL_DATABASE_URL: ${{ secrets.SL_DATABASE_URL }}
@@ -18,7 +15,7 @@ jobs:
         id: preflight
         run: |
           if [ -z "${SL_DATABASE_URL}" ]; then
-            echo "::warning::Missing SL_DATABASE_URL; skipping Weekly Evidence Refresh."
+            echo "::warning::Missing SL_DATABASE_URL; skipping threshold freeze check."
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           else
             echo "should_run=true" >> "$GITHUB_OUTPUT"
@@ -39,14 +36,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Reconcile valuation outcomes
+      - name: Enforce threshold freeze
         if: steps.preflight.outputs.should_run == 'true'
-        run: python scripts/run_valuation_audit_reconcile.py
-
-      - name: Compute valuation cohort MAE
-        if: steps.preflight.outputs.should_run == 'true'
-        run: python scripts/run_valuation_cohort_mae.py
-
-      - name: Generate quarterly evidence report
-        if: steps.preflight.outputs.should_run == 'true'
-        run: python scripts/run_quarterly_evidence_report.py
+        run: python scripts/check_threshold_freeze.py
