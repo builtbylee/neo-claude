@@ -60,6 +60,7 @@ jobs:
         run: |
           TITLE="StartupLens Ops Alert"
           BODY="$(cat /tmp/ops_alerts.json)"
+          gh label create "ops-alert" --color "B60205" --description "Operational alert" --force >/dev/null 2>&1 || true
           ISSUE_NUM=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
           if [ -n "$ISSUE_NUM" ]; then
             gh issue comment "$ISSUE_NUM" --body "\n## $(date -u +'%Y-%m-%d %H:%M UTC')\n\n\`\`\`json\n$BODY\n\`\`\`"
