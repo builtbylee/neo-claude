@@ -28,6 +28,8 @@ def main(
 ) -> None:
     root = Path(__file__).resolve().parents[1]
     runner = root / "scripts" / "run_backtest.py"
+    mae_runner = root / "scripts" / "run_valuation_cohort_mae.py"
+    evidence_runner = root / "scripts" / "run_quarterly_evidence_report.py"
     python = sys.executable
 
     for family in FAMILIES:
@@ -37,6 +39,20 @@ def main(
             check=True,
             cwd=str(root),
         )
+
+    logger.info("computing_valuation_cohort_mae")
+    subprocess.run(
+        [python, str(mae_runner)],
+        check=True,
+        cwd=str(root),
+    )
+
+    logger.info("generating_quarterly_evidence_report")
+    subprocess.run(
+        [python, str(evidence_runner)],
+        check=True,
+        cwd=str(root),
+    )
 
     settings = get_settings()
     conn = get_connection(settings)

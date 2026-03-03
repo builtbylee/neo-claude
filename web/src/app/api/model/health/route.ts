@@ -24,6 +24,8 @@ export async function GET(request: NextRequest) {
     { data: calibrations },
     { data: segments },
     { data: valuationAudits },
+    { data: valuationCohorts },
+    { data: evidenceReports },
   ] = await Promise.all([
     supabase
       .from("backtest_runs")
@@ -51,6 +53,16 @@ export async function GET(request: NextRequest) {
       .not("realized_moic", "is", null)
       .order("created_at", { ascending: false })
       .limit(1000),
+    supabase
+      .from("valuation_cohort_mae")
+      .select("cohort_quarter, segment_key, valuation_confidence, sample_size, mae, mape")
+      .order("cohort_quarter", { ascending: false })
+      .limit(200),
+    supabase
+      .from("quarterly_evidence_reports")
+      .select("report_quarter, generated_at, release_readiness, artifact_path, summary")
+      .order("report_quarter", { ascending: false })
+      .limit(1),
   ]);
 
   const latestRun = runs?.[0] ?? null;
@@ -95,6 +107,9 @@ export async function GET(request: NextRequest) {
         Math.round((absErrors.reduce((a, b) => a + b, 0) / absErrors.length) * 100) / 100;
     }
   }
+
+  const latestEvidence = evidenceReports?.[0] ?? null;
+  const latestValuationCohort = valuationCohorts?.[0] ?? null;
 
   return NextResponse.json({
     latestBacktest: latestRun
@@ -146,6 +161,24 @@ export async function GET(request: NextRequest) {
     valuationAudit: {
       realizedCoverage: valuationAuditCoverage,
       meanAbsoluteError: valuationMeanAbsError,
+      latestCohort: latestValuationCohort
+        ? {
+            quarter: (latestValuationCohort.cohort_quarter as string | null) ?? null,
+            segmentKey: (latestValuationCohort.segment_key as string | null) ?? null,
+            confidence: (latestValuationCohort.valuation_confidence as string | null) ?? null,
+            sampleSize: asNumber(latestValuationCohort.sample_size),
+            mae: asNumber(latestValuationCohort.mae),
+            mape: asNumber(latestValuationCohort.mape),
+          }
+        : null,
     },
+    quarterlyEvidence: latestEvidence
+      ? {
+          reportQuarter: (latestEvidence.report_quarter as string | null) ?? null,
+          generatedAt: (latestEvidence.generated_at as string | null) ?? null,
+          releaseReadiness: Boolean(latestEvidence.release_readiness),
+          artifactPath: (latestEvidence.artifact_path as string | null) ?? null,
+        }
+      : null,
   });
 }

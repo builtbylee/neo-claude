@@ -26,6 +26,19 @@ class MetricResult:
     failure_explanation: str = ""
 
 
+@dataclass
+class CalibrationBin:
+    """One reliability bin from a calibration curve."""
+
+    bin_index: int
+    bin_lower: float
+    bin_upper: float
+    sample_size: int
+    mean_pred: float | None
+    observed_rate: float | None
+    abs_error: float | None
+
+
 # ---------------------------------------------------------------------------
 # ECE (Expected Calibration Error)
 # ---------------------------------------------------------------------------
@@ -81,6 +94,56 @@ def compute_ece(
         ece += (len(indices) / n) * abs(avg_accuracy - avg_confidence)
 
     return ece
+
+
+def compute_calibration_bins(
+    y_true: Sequence[int],
+    y_pred_proba: Sequence[float],
+    n_bins: int = 10,
+) -> list[CalibrationBin]:
+    """Compute fixed-bin calibration curve points used in evidence reports."""
+    if len(y_true) != len(y_pred_proba):
+        raise ValueError("y_true and y_pred_proba must have the same length")
+    if n_bins <= 0:
+        raise ValueError("n_bins must be positive")
+
+    boundaries = [i / n_bins for i in range(n_bins + 1)]
+    bins: list[CalibrationBin] = []
+    for idx in range(n_bins):
+        lo = boundaries[idx]
+        hi = boundaries[idx + 1]
+        indices = [
+            i
+            for i, p in enumerate(y_pred_proba)
+            if (lo <= p < hi) or (idx == n_bins - 1 and p == hi)
+        ]
+        if not indices:
+            bins.append(
+                CalibrationBin(
+                    bin_index=idx,
+                    bin_lower=lo,
+                    bin_upper=hi,
+                    sample_size=0,
+                    mean_pred=None,
+                    observed_rate=None,
+                    abs_error=None,
+                ),
+            )
+            continue
+        mean_pred = sum(y_pred_proba[i] for i in indices) / len(indices)
+        observed = sum(y_true[i] for i in indices) / len(indices)
+        bins.append(
+            CalibrationBin(
+                bin_index=idx,
+                bin_lower=lo,
+                bin_upper=hi,
+                sample_size=len(indices),
+                mean_pred=mean_pred,
+                observed_rate=observed,
+                abs_error=abs(observed - mean_pred),
+            ),
+        )
+    return bins
 
 
 # ---------------------------------------------------------------------------

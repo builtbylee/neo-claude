@@ -187,3 +187,41 @@ test("queryCohort applies deterministic ordering and all filters", async () => {
     ["company_id", { ascending: true }],
   ]);
 });
+
+test("findComparables applies source-tier confidence penalties", async () => {
+  const outcomeRows = Array.from({ length: 80 }, (_, i) => row(i + 1));
+  const pricingRows = Array.from({ length: 140 }, (_, i) => ({
+    key: `pricing-${i}`,
+    sector: "Fintech",
+    country: "UK",
+    pre_money_valuation: 6_000_000 + i * 10_000,
+    revenue_at_raise: null,
+    amount_raised: 200_000 + i * 100,
+    source: "proxy_only",
+    sourceTier: "C" as const,
+    sourceTierWeight: 0.4,
+  }));
+
+  const result = await findComparables(
+    {} as never,
+    {
+      sector: "Fintech",
+      country: "UK",
+      stageBucket: "seed",
+      preMoneyValuation: 8_000_000,
+      fundingTarget: 300_000,
+    },
+    {
+      minCohort: 20,
+      queryCohortFn: async () => outcomeRows,
+      queryPricingCohortFn: async () => pricingRows,
+    },
+  );
+
+  assert.ok(result);
+  assert.equal(result.valuationContext?.multipleType, "raise_proxy_multiple");
+  assert.equal(result.sourceSummary.pricingTierBreakdown.C, 140);
+  assert.equal(result.valuationConfidence, "low");
+  assert.ok(result.sourceSummary.confidencePenalty > 0);
+  assert.ok(result.sourceSummary.confidencePenaltyReasons.length > 0);
+});

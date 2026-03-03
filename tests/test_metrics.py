@@ -6,6 +6,7 @@ import pytest
 
 from startuplens.backtest.metrics import (
     all_must_pass_met,
+    compute_calibration_bins,
     compute_ece,
     evaluate_backtest,
 )
@@ -44,6 +45,38 @@ class TestComputeECE:
         ece = compute_ece([1], [0.7], n_bins=10)
         # |accuracy(1.0) - confidence(0.7)| = 0.3, weighted by 1/1
         assert ece == pytest.approx(0.3, abs=0.05)
+
+
+class TestCalibrationBins:
+    """Verify fixed-bin calibration curve generation."""
+
+    def test_compute_calibration_bins_shape(self):
+        bins = compute_calibration_bins(
+            y_true=[0, 0, 1, 1, 1],
+            y_pred_proba=[0.1, 0.2, 0.7, 0.8, 0.9],
+            n_bins=5,
+        )
+        assert len(bins) == 5
+        assert bins[0].bin_index == 0
+        assert bins[-1].bin_index == 4
+
+    def test_compute_calibration_bins_empty_bin(self):
+        bins = compute_calibration_bins(
+            y_true=[1, 1],
+            y_pred_proba=[0.95, 0.96],
+            n_bins=4,
+        )
+        # First bins should be empty and carry null means/rates.
+        assert bins[0].sample_size == 0
+        assert bins[0].mean_pred is None
+        assert bins[0].observed_rate is None
+        assert bins[0].abs_error is None
+
+    def test_compute_calibration_bins_errors(self):
+        with pytest.raises(ValueError, match="same length"):
+            compute_calibration_bins([1], [0.2, 0.3], n_bins=5)
+        with pytest.raises(ValueError, match="positive"):
+            compute_calibration_bins([1], [0.2], n_bins=0)
 
 
 # ------------------------------------------------------------------

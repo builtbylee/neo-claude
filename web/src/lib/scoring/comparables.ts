@@ -62,6 +62,10 @@ export interface ComparablesResult {
     pricingRevenueSampleSize: number;
     pricingProxySampleSize: number;
     pricingSourceBreakdown: Record<string, number>;
+    pricingTierBreakdown: Record<"A" | "B" | "C", number>;
+    weightedPricingCoverage: number;
+    confidencePenalty: number;
+    confidencePenaltyReasons: string[];
   };
   sourceConfidence: "low" | "medium" | "high";
   valuationConfidence: "low" | "medium" | "high";
@@ -96,6 +100,7 @@ interface PricingCohortRow {
   amount_raised: number | null;
   source: string;
   sourceTier: "A" | "B" | "C";
+  sourceTierWeight: number;
 }
 
 interface CohortFilters {
@@ -113,6 +118,29 @@ type PricingQueryFn = (
   supabase: AnySupabaseClient,
   filters: CohortFilters,
 ) => Promise<PricingCohortRow[]>;
+
+const SOURCE_TIER_WEIGHT: Record<"A" | "B" | "C", number> = {
+  A: 1.0,
+  B: 0.7,
+  C: 0.4,
+};
+
+function tierForCompanySource(sourceRaw: string | null | undefined): "A" | "B" | "C" {
+  const source = (sourceRaw ?? "unknown").toLowerCase();
+  if (["sec_edgar", "sec_dera_cf", "companies_house", "sec_cf_filings"].includes(source)) {
+    return "A";
+  }
+  if (["sec_form_d", "manual", "academic"].includes(source)) {
+    return "B";
+  }
+  return "C";
+}
+
+function downgradeConfidence(value: "low" | "medium" | "high"): "low" | "medium" | "high" {
+  if (value === "high") return "medium";
+  if (value === "medium") return "low";
+  return "low";
+}
 
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
@@ -281,9 +309,21 @@ function dealDistance(
 function inferConfidence(
   outcomeSampleSize: number,
   pricingSampleSize: number,
+  tierBreakdown: Record<"A" | "B" | "C", number>,
 ): "low" | "medium" | "high" {
-  if (outcomeSampleSize >= 200 && pricingSampleSize >= 400) return "high";
-  if (outcomeSampleSize >= 50 && pricingSampleSize >= 120) return "medium";
+  const weightedCoverage = pricingSampleSize > 0
+    ? (
+        tierBreakdown.A * SOURCE_TIER_WEIGHT.A
+        + tierBreakdown.B * SOURCE_TIER_WEIGHT.B
+        + tierBreakdown.C * SOURCE_TIER_WEIGHT.C
+      ) / pricingSampleSize
+    : 0;
+  if (outcomeSampleSize >= 200 && pricingSampleSize >= 400 && weightedCoverage >= 0.75) {
+    return "high";
+  }
+  if (outcomeSampleSize >= 50 && pricingSampleSize >= 120 && weightedCoverage >= 0.55) {
+    return "medium";
+  }
   return "low";
 }
 
@@ -292,42 +332,80 @@ function inferValuationConfidence(input: {
   sourceConfidence: "low" | "medium" | "high";
   pricingRevenueSampleSize: number;
   pricingProxySampleSize: number;
-}): { confidence: "low" | "medium" | "high"; reason: string } {
+  tierBreakdown: Record<"A" | "B" | "C", number>;
+  weightedCoverage: number;
+}): {
+  confidence: "low" | "medium" | "high";
+  reason: string;
+  penalty: number;
+  penaltyReasons: string[];
+} {
   if (!input.valuationContext) {
     return {
       confidence: "low",
       reason: "Insufficient valuation comparables for a reliable pricing context.",
+      penalty: 0,
+      penaltyReasons: [],
     };
   }
 
   const hasRevenueMultiples = input.valuationContext.multipleType === "revenue_multiple";
+  let confidence: "low" | "medium" | "high";
+  let reason: string;
   if (
     hasRevenueMultiples
     && input.valuationContext.sampleSize >= 200
     && input.sourceConfidence !== "low"
     && input.valuationContext.sourceTier !== "C"
   ) {
-    return {
-      confidence: "high",
-      reason: "Large revenue-multiple cohort with broad source coverage.",
-    };
-  }
-
-  if (
+    confidence = "high";
+    reason = "Large revenue-multiple cohort with broad source coverage.";
+  } else if (
     (hasRevenueMultiples && input.pricingRevenueSampleSize >= 60)
     || (!hasRevenueMultiples && input.pricingProxySampleSize >= 120)
   ) {
-    return {
-      confidence: "medium",
-      reason: hasRevenueMultiples
-        ? "Moderate revenue-multiple coverage; use with analyst review."
-        : "Proxy-multiple context available, but revenue-linked comps are limited.",
-    };
+    confidence = "medium";
+    reason = hasRevenueMultiples
+      ? "Moderate revenue-multiple coverage; use with analyst review."
+      : "Proxy-multiple context available, but revenue-linked comps are limited.";
+  } else {
+    confidence = "low";
+    reason = "Valuation relies on sparse or proxy-only comparable pricing evidence.";
+  }
+
+  const penaltyReasons: string[] = [];
+  let penalty = 0;
+  const tierTotal = input.tierBreakdown.A + input.tierBreakdown.B + input.tierBreakdown.C;
+  const tierARatio = tierTotal > 0 ? input.tierBreakdown.A / tierTotal : 0;
+  const proxyRatio = (
+    input.pricingRevenueSampleSize + input.pricingProxySampleSize > 0
+      ? input.pricingProxySampleSize / (input.pricingRevenueSampleSize + input.pricingProxySampleSize)
+      : 1
+  );
+
+  if (input.weightedCoverage < 0.60) {
+    confidence = downgradeConfidence(confidence);
+    penalty += 1;
+    penaltyReasons.push("Low weighted source quality coverage.");
+  }
+  if (tierARatio < 0.25) {
+    confidence = downgradeConfidence(confidence);
+    penalty += 1;
+    penaltyReasons.push("Tier-A evidence share is below 25%.");
+  }
+  if (!hasRevenueMultiples || proxyRatio > 0.55) {
+    confidence = downgradeConfidence(confidence);
+    penalty += 1;
+    penaltyReasons.push("Valuation relies heavily on proxy multiples.");
   }
 
   return {
-    confidence: "low",
-    reason: "Valuation relies on sparse or proxy-only comparable pricing evidence.",
+    confidence,
+    reason: penaltyReasons.length > 0
+      ? `${reason} Penalties applied: ${penaltyReasons.join(" ")}`
+      : reason,
+    penalty,
+    penaltyReasons,
   };
 }
 
@@ -410,6 +488,7 @@ async function queryPricingFromTrainingFeatures(
     amount_raised: r.amount_raised as number | null,
     source: "training_features",
     sourceTier: "B",
+    sourceTierWeight: SOURCE_TIER_WEIGHT.B,
   }));
 }
 
@@ -462,17 +541,31 @@ async function queryPricingFromFundingRounds(
         revenueByCompany.set(companyId, revenue);
       }
     }
+
+    // Fallback for non-crowdfunding sources: latest annual filing revenue.
+    const { data: finRows } = await supabase
+      .from("financial_data")
+      .select("company_id, period_end_date, revenue")
+      .eq("period_type", "annual")
+      .not("revenue", "is", null)
+      .gt("revenue", 0)
+      .in("company_id", ids)
+      .order("period_end_date", { ascending: false });
+
+    for (const rec of (finRows ?? []) as Array<Record<string, unknown>>) {
+      const companyId = rec.company_id as string;
+      if (!companyId || revenueByCompany.has(companyId)) continue;
+      const revenue = rec.revenue as number | null;
+      if (revenue && revenue > 0) {
+        revenueByCompany.set(companyId, revenue);
+      }
+    }
   }
 
   return candidateRounds.map((r) => {
     const company = r.companies as { source?: string | null; sector?: string | null; country?: string | null } | null;
     const companySource = (company?.source ?? "unknown").toLowerCase();
-    let sourceTier: "A" | "B" | "C" = "C";
-    if (["sec_edgar", "sec_dera_cf", "companies_house"].includes(companySource)) {
-      sourceTier = "A";
-    } else if (["sec_form_d", "manual", "academic"].includes(companySource)) {
-      sourceTier = "B";
-    }
+    const sourceTier = tierForCompanySource(companySource);
 
     const companyId = r.company_id as string | null;
     const roundSource = (r.source as string | null) ?? companySource;
@@ -486,8 +579,52 @@ async function queryPricingFromFundingRounds(
       amount_raised: r.amount_raised as number | null,
       source: `funding_rounds:${roundSource}`,
       sourceTier,
+      sourceTierWeight: SOURCE_TIER_WEIGHT[sourceTier],
     };
   });
+}
+
+async function queryPricingFromCrowdfundingOutcomes(
+  supabase: AnySupabaseClient,
+  filters: CohortFilters,
+  limit = 1500,
+): Promise<PricingCohortRow[]> {
+  const { data, error } = await supabase
+    .from("crowdfunding_outcomes")
+    .select(
+      "id, company_id, pre_money_valuation, revenue_at_raise, amount_raised, companies!inner(source, sector, country)",
+    )
+    .lte("label_quality_tier", 2)
+    .not("pre_money_valuation", "is", null)
+    .gt("pre_money_valuation", 0)
+    .order("campaign_date", { ascending: false })
+    .limit(limit);
+
+  if (error || !data) return [];
+
+  const rows = data as Array<Record<string, unknown>>;
+  return rows
+    .filter((row) => {
+      const company = row.companies as { sector?: string | null; country?: string | null } | null;
+      if (filters.sector && company?.sector !== filters.sector) return false;
+      if (filters.country && company?.country !== filters.country) return false;
+      return true;
+    })
+    .map((row) => {
+      const company = row.companies as { source?: string | null; sector?: string | null; country?: string | null } | null;
+      const sourceTier = tierForCompanySource(company?.source);
+      return {
+        key: `co:${String(row.id)}`,
+        sector: company?.sector ?? null,
+        country: company?.country ?? null,
+        pre_money_valuation: row.pre_money_valuation as number | null,
+        revenue_at_raise: row.revenue_at_raise as number | null,
+        amount_raised: row.amount_raised as number | null,
+        source: `crowdfunding_outcomes:${company?.source ?? "unknown"}`,
+        sourceTier,
+        sourceTierWeight: SOURCE_TIER_WEIGHT[sourceTier],
+      };
+    });
 }
 
 export async function queryPricingCohort(
@@ -499,16 +636,23 @@ export async function queryPricingCohort(
   },
 ): Promise<PricingCohortRow[]> {
   const maxRows = opts?.maxRows ?? 1500;
-  const tfwRows = await queryPricingFromTrainingFeatures(supabase, filters, maxRows);
+  const [tfwRows, outcomeRows] = await Promise.all([
+    queryPricingFromTrainingFeatures(supabase, filters, maxRows),
+    queryPricingFromCrowdfundingOutcomes(supabase, filters, maxRows),
+  ]);
   if (opts?.liteMode) {
-    return tfwRows;
+    const dedupLite = new Map<string, PricingCohortRow>();
+    for (const row of [...outcomeRows, ...tfwRows]) {
+      if (!dedupLite.has(row.key)) dedupLite.set(row.key, row);
+    }
+    return Array.from(dedupLite.values());
   }
   const roundRows = await queryPricingFromFundingRounds(supabase, filters, maxRows);
 
   const seen = new Set<string>();
   const out: PricingCohortRow[] = [];
 
-  for (const row of [...tfwRows, ...roundRows]) {
+  for (const row of [...outcomeRows, ...tfwRows, ...roundRows]) {
     if (seen.has(row.key)) continue;
     seen.add(row.key);
     out.push(row);
@@ -598,9 +742,14 @@ export async function findComparables(
     const cohortStats = computeStats(outcomeRows);
 
     const pricingSourceBreakdown: Record<string, number> = {};
+    const pricingTierBreakdown: Record<"A" | "B" | "C", number> = { A: 0, B: 0, C: 0 };
     for (const row of pricingRows) {
       pricingSourceBreakdown[row.source] = (pricingSourceBreakdown[row.source] ?? 0) + 1;
+      pricingTierBreakdown[row.sourceTier] += 1;
     }
+    const weightedPricingCoverage = pricingRows.length > 0
+      ? pricingRows.reduce((acc, row) => acc + row.sourceTierWeight, 0) / pricingRows.length
+      : 0;
 
     const pricingRevenueMultiples = pricingRows
       .map((r) => {
@@ -678,12 +827,18 @@ export async function findComparables(
 
     const outcomeSampleSize = outcomeRows.length;
     const pricingSampleSize = pricingRows.length;
-    const sourceConfidence = inferConfidence(outcomeSampleSize, pricingSampleSize);
+    const sourceConfidence = inferConfidence(
+      outcomeSampleSize,
+      pricingSampleSize,
+      pricingTierBreakdown,
+    );
     const valuationConfidenceMeta = inferValuationConfidence({
       valuationContext,
       sourceConfidence,
       pricingRevenueSampleSize: pricingRevenueMultiples.length,
       pricingProxySampleSize: pricingProxyMultiples.length,
+      tierBreakdown: pricingTierBreakdown,
+      weightedCoverage: weightedPricingCoverage,
     });
 
     return {
@@ -697,6 +852,10 @@ export async function findComparables(
         pricingRevenueSampleSize: pricingRevenueMultiples.length,
         pricingProxySampleSize: pricingProxyMultiples.length,
         pricingSourceBreakdown,
+        pricingTierBreakdown,
+        weightedPricingCoverage: Math.round(weightedPricingCoverage * 100) / 100,
+        confidencePenalty: valuationConfidenceMeta.penalty,
+        confidencePenaltyReasons: valuationConfidenceMeta.penaltyReasons,
       },
       sourceConfidence,
       valuationConfidence: valuationConfidenceMeta.confidence,

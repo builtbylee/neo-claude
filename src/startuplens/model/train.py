@@ -308,6 +308,16 @@ def score_deals(
     return scores
 
 
+def predict_failure_probabilities(
+    model: TrainedModel,
+    rows: list[dict],
+) -> list[float]:
+    """Return raw P(fail) probabilities for calibration/evidence diagnostics."""
+    X = _build_feature_matrix(rows, FEATURE_COLUMNS, CATEGORICAL_FEATURES)  # noqa: N806
+    p_fail = model.model.predict_proba(X)[:, 1]
+    return [float(p) for p in p_fail]
+
+
 def train_progress_model(
     train_rows: list[dict],
     test_rows: list[dict],

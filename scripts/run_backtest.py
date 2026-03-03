@@ -20,7 +20,12 @@ from startuplens.backtest.baselines import (
     random_baseline,
     sector_momentum_baseline,
 )
-from startuplens.backtest.metrics import all_must_pass_met, evaluate_backtest
+from startuplens.backtest.holdout import get_holdout_entity_ids
+from startuplens.backtest.metrics import (
+    all_must_pass_met,
+    compute_calibration_bins,
+    evaluate_backtest,
+)
 from startuplens.backtest.provenance import log_backtest_run
 from startuplens.backtest.simulator import (
     InvestorPolicy,
@@ -34,6 +39,7 @@ from startuplens.db import execute_query, get_connection, refresh_matview
 from startuplens.model.progress_labels import load_progress_labels
 from startuplens.model.train import (
     filter_rows_for_family,
+    predict_failure_probabilities,
     score_deals,
     train_model,
     train_progress_model,
@@ -175,12 +181,127 @@ def _enrich_growth_features(conn, rows: list[dict]) -> None:
             row["net_income_improvement"] = g.get("net_income_improvement")
 
 
+def _upsert_window_evidence(
+    conn,
+    *,
+    run_id: int,
+    segment_key: str,
+    rows: list[dict],
+) -> None:
+    if not rows:
+        return
+    query = """
+        INSERT INTO backtest_window_results (
+            backtest_run_id, segment_key, window_label,
+            train_start, train_end, test_start, test_end,
+            deals, labeled, survival_auc, calibration_ece,
+            portfolio_failure_rate, portfolio_quality,
+            failure_vs_random, quality_vs_random, progress_auc,
+            model_uncertainty_rate, top_k_sector_concentration
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        ON CONFLICT (backtest_run_id, segment_key, window_label) DO UPDATE
+        SET
+            train_start = EXCLUDED.train_start,
+            train_end = EXCLUDED.train_end,
+            test_start = EXCLUDED.test_start,
+            test_end = EXCLUDED.test_end,
+            deals = EXCLUDED.deals,
+            labeled = EXCLUDED.labeled,
+            survival_auc = EXCLUDED.survival_auc,
+            calibration_ece = EXCLUDED.calibration_ece,
+            portfolio_failure_rate = EXCLUDED.portfolio_failure_rate,
+            portfolio_quality = EXCLUDED.portfolio_quality,
+            failure_vs_random = EXCLUDED.failure_vs_random,
+            quality_vs_random = EXCLUDED.quality_vs_random,
+            progress_auc = EXCLUDED.progress_auc,
+            model_uncertainty_rate = EXCLUDED.model_uncertainty_rate,
+            top_k_sector_concentration = EXCLUDED.top_k_sector_concentration
+    """
+    for row in rows:
+        execute_query(
+            conn,
+            query,
+            (
+                run_id,
+                segment_key,
+                row["window_label"],
+                row["train_start"],
+                row["train_end"],
+                row["test_start"],
+                row["test_end"],
+                row["deals"],
+                row["labeled"],
+                row["survival_auc"],
+                row["calibration_ece"],
+                row["portfolio_failure_rate"],
+                row["portfolio_quality"],
+                row["failure_vs_random"],
+                row["quality_vs_random"],
+                row["progress_auc"],
+                row["model_uncertainty_rate"],
+                row["top_k_sector_concentration"],
+            ),
+        )
+
+
+def _upsert_calibration_bins(
+    conn,
+    *,
+    run_id: int,
+    segment_key: str,
+    rows: list[dict],
+) -> None:
+    if not rows:
+        return
+    query = """
+        INSERT INTO backtest_calibration_curves (
+            backtest_run_id, segment_key, window_label, bin_index,
+            bin_lower, bin_upper, sample_size, mean_pred, observed_rate, abs_error
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (backtest_run_id, segment_key, window_label, bin_index) DO UPDATE
+        SET
+            sample_size = EXCLUDED.sample_size,
+            mean_pred = EXCLUDED.mean_pred,
+            observed_rate = EXCLUDED.observed_rate,
+            abs_error = EXCLUDED.abs_error
+    """
+    for row in rows:
+        execute_query(
+            conn,
+            query,
+            (
+                run_id,
+                segment_key,
+                row["window_label"],
+                row["bin_index"],
+                row["bin_lower"],
+                row["bin_upper"],
+                row["sample_size"],
+                row["mean_pred"],
+                row["observed_rate"],
+                row["abs_error"],
+            ),
+        )
+
+
 @app.command()
 def main(
     model_family: str = typer.Option("UK_Seed", help="Model family to evaluate"),
     max_per_year: int = typer.Option(5, help="Max investments per year"),
     check_size: float = typer.Option(10_000.0, help="Check size per investment"),
     max_per_sector: int = typer.Option(2, help="Max investments per sector per year"),
+    holdout_window: str = typer.Option(
+        "2023-2025",
+        help="Locked holdout window label for out-of-time evidence.",
+    ),
+    require_locked_holdout: bool = typer.Option(
+        True,
+        help="Fail run when the configured holdout window is missing.",
+    ),
 ) -> None:
     """Run walk-forward backtest with ML model and baselines."""
     settings = get_settings()
@@ -199,11 +320,25 @@ def main(
         logger.info("matview_refreshed")
 
         windows = generate_walk_forward_windows()
+        locked_holdout_ids = set(get_holdout_entity_ids(conn, holdout_window))
+        logger.info(
+            "locked_holdout_loaded",
+            window=holdout_window,
+            entities=len(locked_holdout_ids),
+        )
+        if require_locked_holdout and not locked_holdout_ids:
+            raise typer.BadParameter(
+                f"No locked holdout entities found for window '{holdout_window}'. "
+                "Run scripts/run_quarantine_holdout.py before backtesting.",
+            )
+
         prior_deals: list[ScoredDeal] = []
         window_results: list[dict] = []
         all_model_aucs: list[float] = []
         all_model_eces: list[float] = []
         all_progress_aucs: list[float] = []
+        window_evidence_rows: list[dict] = []
+        calibration_curve_rows: list[dict] = []
 
         for window in windows:
             # Load train and test data as full feature rows
@@ -228,6 +363,20 @@ def main(
                 train_rows = train_rows_all
                 test_rows = test_rows_all
 
+            # Locked holdout enforcement:
+            # 1) never allow locked entities into training data
+            # 2) for the locked window, evaluate only the quarantined entities
+            if locked_holdout_ids:
+                train_rows = [
+                    r for r in train_rows
+                    if r.get("entity_id") not in locked_holdout_ids
+                ]
+                if holdout_window in window.label:
+                    test_rows = [
+                        r for r in test_rows
+                        if r.get("entity_id") in locked_holdout_ids
+                    ]
+
             logger.info(
                 "loaded_window",
                 window=window.label,
@@ -244,14 +393,36 @@ def main(
 
             model_scored_deals = None
             model_scores = None
+            window_model_auc = math.nan
+            window_model_ece = math.nan
+            window_progress_auc = math.nan
             if len(train_labeled) >= 50 and len(test_labeled) >= 10:
                 trained = train_model(train_rows, test_rows)
                 all_model_aucs.append(trained.auc)
                 all_model_eces.append(trained.ece)
+                window_model_auc = trained.auc
+                window_model_ece = trained.ece
 
                 # Score ALL test deals (including unknown) for portfolio simulation
                 model_scores = score_deals(trained, test_rows)
                 # model_scored_deals built after enrichment below
+
+                y_true = [1 if r.get("outcome") == "failed" else 0 for r in test_labeled]
+                p_fail = predict_failure_probabilities(trained, test_labeled)
+                bins = compute_calibration_bins(y_true, p_fail, n_bins=10)
+                calibration_curve_rows.extend(
+                    {
+                        "window_label": window.label,
+                        "bin_index": b.bin_index,
+                        "bin_lower": b.bin_lower,
+                        "bin_upper": b.bin_upper,
+                        "sample_size": b.sample_size,
+                        "mean_pred": b.mean_pred,
+                        "observed_rate": b.observed_rate,
+                        "abs_error": b.abs_error,
+                    }
+                    for b in bins
+                )
 
                 logger.info(
                     "model_trained",
@@ -304,6 +475,7 @@ def main(
             )
             if progress_trained is not None:
                 all_progress_aucs.append(progress_trained.auc)
+                window_progress_auc = progress_trained.auc
                 logger.info(
                     "progress_model_trained",
                     window=window.label,
@@ -365,6 +537,10 @@ def main(
 
             result = {
                 "window": window.label,
+                "train_start": window.train_start.isoformat(),
+                "train_end": window.train_end.isoformat(),
+                "test_start": window.test_start.isoformat(),
+                "test_end": window.test_end.isoformat(),
                 "deals": len(test_rows),
                 "labeled": len(test_labeled),
                 "random_failure_rate": random_pf.failure_rate,
@@ -372,6 +548,9 @@ def main(
                 "momentum_failure_rate": momentum_pf.failure_rate,
                 "model_failure_rate": model_pf.failure_rate if model_pf else None,
                 "model_fail_vs_random": model_fail_vs_random,
+                "model_auc": None if math.isnan(window_model_auc) else window_model_auc,
+                "model_ece": None if math.isnan(window_model_ece) else window_model_ece,
+                "progress_auc": None if math.isnan(window_progress_auc) else window_progress_auc,
                 "model_uncertainty_rate": uncertainty_rate,
                 "top_k_sector_concentration": top_k_sector,
                 "model_quality": model_quality,
@@ -380,6 +559,36 @@ def main(
             }
 
             window_results.append(result)
+            window_evidence_rows.append(
+                {
+                    "window_label": window.label,
+                    "train_start": window.train_start.isoformat(),
+                    "train_end": window.train_end.isoformat(),
+                    "test_start": window.test_start.isoformat(),
+                    "test_end": window.test_end.isoformat(),
+                    "deals": len(test_rows),
+                    "labeled": len(test_labeled),
+                    "survival_auc": None if math.isnan(window_model_auc) else window_model_auc,
+                    "calibration_ece": None if math.isnan(window_model_ece) else window_model_ece,
+                    "portfolio_failure_rate": model_pf.failure_rate if model_pf else None,
+                    "portfolio_quality": None if math.isnan(model_quality) else model_quality,
+                    "failure_vs_random": (
+                        None if math.isnan(model_fail_vs_random) else model_fail_vs_random
+                    ),
+                    "quality_vs_random": (
+                        None if math.isnan(quality_vs_random) else quality_vs_random
+                    ),
+                    "progress_auc": (
+                        None if math.isnan(window_progress_auc) else window_progress_auc
+                    ),
+                    "model_uncertainty_rate": (
+                        None if math.isnan(uncertainty_rate) else uncertainty_rate
+                    ),
+                    "top_k_sector_concentration": (
+                        None if math.isnan(top_k_sector) else top_k_sector
+                    ),
+                },
+            )
 
             logger.info(
                 "window_result",
@@ -578,6 +787,26 @@ def main(
             )
         except Exception:  # noqa: BLE001
             logger.warning("segment_model_evidence_upsert_failed")
+
+        try:
+            _upsert_window_evidence(
+                conn,
+                run_id=run_id,
+                segment_key=model_family,
+                rows=window_evidence_rows,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("backtest_window_results_upsert_failed")
+
+        try:
+            _upsert_calibration_bins(
+                conn,
+                run_id=run_id,
+                segment_key=model_family,
+                rows=calibration_curve_rows,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("backtest_calibration_curves_upsert_failed")
 
         conn.commit()
         logger.info(

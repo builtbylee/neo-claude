@@ -8,7 +8,7 @@ import typer
 
 from startuplens.backtest.holdout import get_holdout_summary, quarantine_holdout
 from startuplens.config import get_settings
-from startuplens.db import execute_query, get_connection
+from startuplens.db import execute_query, get_connection, refresh_matview
 
 logger = structlog.get_logger(__name__)
 app = typer.Typer()
@@ -27,16 +27,14 @@ def main(
     conn = get_connection(settings)
 
     try:
+        refresh_matview(conn)
         # Find entities with campaign dates in the holdout window
         rows = execute_query(
             conn,
             """
-            SELECT DISTINCT ce.id::text AS entity_id
-            FROM canonical_entities ce
-            JOIN entity_links el ON el.entity_id = ce.id
-            JOIN companies c ON c.source_id = el.source_identifier AND el.source = c.source
-            JOIN funding_rounds fr ON fr.company_id = c.id
-            WHERE fr.round_date BETWEEN %s AND %s
+            SELECT DISTINCT tfw.entity_id::text AS entity_id
+            FROM training_features_wide tfw
+            WHERE tfw.as_of_date BETWEEN %s AND %s
             """,
             (test_start, test_end),
         )

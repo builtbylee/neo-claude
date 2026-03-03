@@ -164,6 +164,10 @@ type ScoreResponse = {
       pricingRevenueSampleSize: number;
       pricingProxySampleSize: number;
       pricingSourceBreakdown: Record<string, number>;
+      pricingTierBreakdown: Record<"A" | "B" | "C", number>;
+      weightedPricingCoverage: number;
+      confidencePenalty: number;
+      confidencePenaltyReasons: string[];
     };
     sourceConfidence: "low" | "medium" | "high";
     valuationConfidence: "low" | "medium" | "high";

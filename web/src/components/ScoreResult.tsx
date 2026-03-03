@@ -157,6 +157,10 @@ interface ScoreResultProps {
         pricingRevenueSampleSize: number;
         pricingProxySampleSize: number;
         pricingSourceBreakdown: Record<string, number>;
+        pricingTierBreakdown: Record<"A" | "B" | "C", number>;
+        weightedPricingCoverage: number;
+        confidencePenalty: number;
+        confidencePenaltyReasons: string[];
       };
       sourceConfidence: "low" | "medium" | "high";
       valuationConfidence: "low" | "medium" | "high";
@@ -647,6 +651,26 @@ export default function ScoreResult({ result }: ScoreResultProps) {
           <div className="text-xs text-neutral-500 mb-3">
             {result.comparables.valuationConfidenceReason}
           </div>
+          <div className="text-xs text-neutral-500 mb-4">
+            Tier mix: A {result.comparables.sourceSummary.pricingTierBreakdown.A}
+            {" · "}
+            B {result.comparables.sourceSummary.pricingTierBreakdown.B}
+            {" · "}
+            C {result.comparables.sourceSummary.pricingTierBreakdown.C}
+            {" · "}
+            weighted coverage {result.comparables.sourceSummary.weightedPricingCoverage.toFixed(2)}
+            {result.comparables.sourceSummary.confidencePenalty > 0 && (
+              <>
+                {" · "}
+                penalty {result.comparables.sourceSummary.confidencePenalty}
+              </>
+            )}
+          </div>
+          {result.comparables.sourceSummary.confidencePenaltyReasons.length > 0 && (
+            <div className="text-xs text-amber-300 mb-4">
+              {result.comparables.sourceSummary.confidencePenaltyReasons.join(" ")}
+            </div>
+          )}
 
           {/* Cohort base rates */}
           <div className="grid grid-cols-3 gap-4 mb-4">

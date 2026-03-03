@@ -506,6 +506,9 @@ export async function POST(request: NextRequest) {
   };
 
   const rubricResult = computeRubric(rubricInput);
+  const confidencePenalty = comparables?.sourceSummary.confidencePenalty ?? 0;
+  const confidencePenaltyPoints = Math.min(12, confidencePenalty * 4);
+  const adjustedScore = Math.max(0, rubricResult.overallScore - confidencePenaltyPoints);
   const valuationConfidence = comparables?.valuationConfidence ?? "low";
   const valuationConfidenceReason =
     comparables?.valuationConfidenceReason
@@ -522,7 +525,7 @@ export async function POST(request: NextRequest) {
   // Step 6: Abstention gates
   const gateInput: GateCheckInput = {
     dataCompleteness: rubricResult.dataCompleteness,
-    modelScore: rubricResult.overallScore,
+    modelScore: adjustedScore,
     confidenceRange: rubricResult.confidenceRange,
     isQuickScore: true,
     valuationConfidence,
@@ -542,7 +545,7 @@ export async function POST(request: NextRequest) {
 
   // Step 7: Recommendation
   let recommendation = classify(
-    rubricResult.overallScore,
+    adjustedScore,
     rubricResult.confidenceRange,
     gates,
   );
@@ -567,7 +570,7 @@ export async function POST(request: NextRequest) {
     companyName: body.companyName,
     sector: body.sector ?? null,
     matchedCompany: company?.name ?? null,
-    score: rubricResult.overallScore,
+    score: adjustedScore,
     confidenceRange: rubricResult.confidenceRange,
     recommendationLabel: recommendation.label,
     recommendationDescription: recommendation.description,
@@ -622,7 +625,7 @@ export async function POST(request: NextRequest) {
       evaluation_type: "quick",
       segment_key: segmentKey,
       recommendation_class: recommendation.class,
-      score: rubricResult.overallScore,
+      score: adjustedScore,
       data_completeness: rubricResult.dataCompleteness,
       valuation_confidence: valuationConfidence,
       valuation_confidence_reason: valuationConfidenceReason,
@@ -637,7 +640,7 @@ export async function POST(request: NextRequest) {
   }
 
   const response: QuickScoreResponse = {
-    score: rubricResult.overallScore,
+    score: adjustedScore,
     confidenceRange: rubricResult.confidenceRange,
     recommendation: {
       class: recommendation.class,
@@ -698,7 +701,7 @@ export async function POST(request: NextRequest) {
     companyName: body.companyName,
     matchedCompany: company?.name ?? null,
     recommendationClass: recommendation.class,
-    score: rubricResult.overallScore,
+    score: adjustedScore,
   });
 
   return NextResponse.json(response);
