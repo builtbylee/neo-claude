@@ -48,6 +48,32 @@ type ScoreResponse = {
     label: string;
     impact: string;
   }>;
+  comparables: {
+    cohortStats: {
+      sampleSize: number;
+      failureRate: number;
+      survivalRate: number;
+      exitRate: number;
+      medianFundingTarget: number | null;
+      medianRevenueAtRaise: number | null;
+      medianCompanyAgeMonths: number | null;
+      medianOverfundingRatio: number | null;
+      pctWithInstitutional: number;
+      pctPreRevenue: number;
+    };
+    cohortLabel: string;
+    nearestDeals: Array<{
+      name: string;
+      sector: string | null;
+      country: string | null;
+      fundingTarget: number | null;
+      revenueAtRaise: number | null;
+      companyAgeMonths: number | null;
+      outcome: string;
+      platform: string | null;
+      campaignDate: string | null;
+    }>;
+  } | null;
 };
 
 export default function Home() {

@@ -13,6 +13,7 @@ import { findCompany, getSupabaseClient, loadFeatures } from "@/lib/db/supabase"
 import { scrapeWebsite } from "@/lib/enrichment/website-scraper";
 import { scoreFromKnowledge } from "@/lib/enrichment/knowledge-enrichment";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
+import { findComparables, type ComparablesResult } from "@/lib/scoring/comparables";
 import { checkGates, type GateCheckInput } from "@/lib/scoring/gates";
 import { classify } from "@/lib/scoring/recommendation";
 import { type RubricInput, computeRubric } from "@/lib/scoring/rubric";
@@ -52,6 +53,7 @@ interface QuickScoreResponse {
   generatedProfile: string | null;
   memo: ICMemo | null;
   missingFields: MissingField[];
+  comparables: ComparablesResult | null;
 }
 
 export async function POST(request: NextRequest) {
@@ -296,6 +298,23 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // Step 8: Comparables — find similar deals and compute cohort stats
+  let comparables: ComparablesResult | null = null;
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const supabase = getSupabaseClient(supabaseUrl, supabaseKey);
+      comparables = await findComparables(supabase, {
+        sector: body.sector ?? company?.sector ?? null,
+        country: (features.country as string) ?? company?.country ?? null,
+        fundingTarget: (features.funding_target as number) ?? body.fundingTarget ?? null,
+        companyAge: (features.company_age_months as number) ?? null,
+        revenue: effectiveRevenue,
+      });
+    } catch {
+      // Comparables query failed — continue without it
+    }
+  }
+
   const response: QuickScoreResponse = {
     score: rubricResult.overallScore,
     confidenceRange: rubricResult.confidenceRange,
@@ -331,6 +350,7 @@ export async function POST(request: NextRequest) {
     generatedProfile,
     memo,
     missingFields,
+    comparables,
   };
 
   return NextResponse.json(response);

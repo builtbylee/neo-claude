@@ -44,6 +44,32 @@ interface ScoreResultProps {
       label: string;
       impact: string;
     }>;
+    comparables: {
+      cohortStats: {
+        sampleSize: number;
+        failureRate: number;
+        survivalRate: number;
+        exitRate: number;
+        medianFundingTarget: number | null;
+        medianRevenueAtRaise: number | null;
+        medianCompanyAgeMonths: number | null;
+        medianOverfundingRatio: number | null;
+        pctWithInstitutional: number;
+        pctPreRevenue: number;
+      };
+      cohortLabel: string;
+      nearestDeals: Array<{
+        name: string;
+        sector: string | null;
+        country: string | null;
+        fundingTarget: number | null;
+        revenueAtRaise: number | null;
+        companyAgeMonths: number | null;
+        outcome: string;
+        platform: string | null;
+        campaignDate: string | null;
+      }>;
+    } | null;
   };
 }
 
@@ -260,6 +286,114 @@ export default function ScoreResult({ result }: ScoreResultProps) {
           ))}
         </div>
       </div>
+
+      {/* Comparables */}
+      {result.comparables && (
+        <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+          <h3 className="text-sm font-semibold text-neutral-300 mb-1">
+            Comparables
+          </h3>
+          <p className="text-xs text-neutral-500 mb-4">
+            Based on {result.comparables.cohortStats.sampleSize.toLocaleString()} {result.comparables.cohortLabel} (n={result.comparables.cohortStats.sampleSize})
+          </p>
+
+          {/* Cohort base rates */}
+          <div className="grid grid-cols-3 gap-4 mb-4">
+            <div className="text-center">
+              <div className="text-lg font-bold text-red-400">
+                {Math.round(result.comparables.cohortStats.failureRate * 100)}%
+              </div>
+              <div className="text-xs text-neutral-500">Failure Rate</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-bold text-green-400">
+                {Math.round(result.comparables.cohortStats.survivalRate * 100)}%
+              </div>
+              <div className="text-xs text-neutral-500">Still Trading</div>
+            </div>
+            <div className="text-center">
+              <div className="text-lg font-bold text-blue-400">
+                {Math.round(result.comparables.cohortStats.exitRate * 100)}%
+              </div>
+              <div className="text-xs text-neutral-500">Exited</div>
+            </div>
+          </div>
+
+          {/* Cohort medians */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4 text-sm">
+            {result.comparables.cohortStats.medianFundingTarget !== null && (
+              <div>
+                <span className="text-neutral-500">Median Raise: </span>
+                <span className="text-neutral-200">
+                  ${Math.round(result.comparables.cohortStats.medianFundingTarget).toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.comparables.cohortStats.medianRevenueAtRaise !== null && (
+              <div>
+                <span className="text-neutral-500">Median Revenue: </span>
+                <span className="text-neutral-200">
+                  ${Math.round(result.comparables.cohortStats.medianRevenueAtRaise).toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.comparables.cohortStats.medianCompanyAgeMonths !== null && (
+              <div>
+                <span className="text-neutral-500">Median Age: </span>
+                <span className="text-neutral-200">
+                  {result.comparables.cohortStats.medianCompanyAgeMonths >= 12
+                    ? `${Math.round(result.comparables.cohortStats.medianCompanyAgeMonths / 12)}y`
+                    : `${Math.round(result.comparables.cohortStats.medianCompanyAgeMonths)}mo`}
+                </span>
+              </div>
+            )}
+            <div>
+              <span className="text-neutral-500">Pre-Revenue: </span>
+              <span className="text-neutral-200">
+                {Math.round(result.comparables.cohortStats.pctPreRevenue * 100)}%
+              </span>
+            </div>
+          </div>
+
+          {/* Nearest deals */}
+          {result.comparables.nearestDeals.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-2">
+                Most Similar Deals
+              </h4>
+              <div className="space-y-2">
+                {result.comparables.nearestDeals.map((deal, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between text-sm py-1.5 border-b border-neutral-700/30 last:border-0"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className={`w-2 h-2 rounded-full shrink-0 ${
+                          deal.outcome === "trading"
+                            ? "bg-green-500"
+                            : deal.outcome === "exited"
+                              ? "bg-blue-500"
+                              : "bg-red-500"
+                        }`}
+                      />
+                      <span className="text-neutral-200 truncate">
+                        {deal.name}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0 text-xs text-neutral-500">
+                      {deal.fundingTarget && (
+                        <span>${Math.round(deal.fundingTarget).toLocaleString()}</span>
+                      )}
+                      <span className="capitalize">{deal.outcome}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* AI-Generated Company Profile (knowledge mode) */}
       {result.dataSource === "ai_knowledge" && result.generatedProfile && (
