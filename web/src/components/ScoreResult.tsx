@@ -44,6 +44,20 @@ interface ScoreResultProps {
       label: string;
       impact: string;
     }>;
+    dealTerms: {
+      instrument_type: string | null;
+      round_type: string | null;
+      amount_raised: number | null;
+      pre_money_valuation: number | null;
+      platform: string | null;
+      round_date: string | null;
+      overfunding_ratio: number | null;
+      investor_count: number | null;
+      funding_velocity_days: number | null;
+      eis_seis_eligible: boolean | null;
+      qsbs_eligible: boolean | null;
+      qualified_institutional: boolean | null;
+    } | null;
     comparables: {
       cohortStats: {
         sampleSize: number;
@@ -286,6 +300,89 @@ export default function ScoreResult({ result }: ScoreResultProps) {
           ))}
         </div>
       </div>
+
+      {/* Deal Terms */}
+      {result.dealTerms && (
+        <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+          <h3 className="text-sm font-semibold text-neutral-300 mb-3">
+            Deal Terms
+          </h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
+            {result.dealTerms.instrument_type && (
+              <div>
+                <span className="text-neutral-500">Instrument: </span>
+                <span className="text-neutral-200 font-medium capitalize">
+                  {result.dealTerms.instrument_type.replace(/_/g, " ")}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.amount_raised !== null && (
+              <div>
+                <span className="text-neutral-500">Amount Raised: </span>
+                <span className="text-neutral-200 font-medium">
+                  ${Math.round(result.dealTerms.amount_raised).toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.pre_money_valuation !== null && (
+              <div>
+                <span className="text-neutral-500">Pre-Money: </span>
+                <span className="text-neutral-200 font-medium">
+                  ${Math.round(result.dealTerms.pre_money_valuation).toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.platform && (
+              <div>
+                <span className="text-neutral-500">Platform: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.dealTerms.platform}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.overfunding_ratio !== null && (
+              <div>
+                <span className="text-neutral-500">Overfunding: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.dealTerms.overfunding_ratio.toFixed(2)}x
+                </span>
+              </div>
+            )}
+            {result.dealTerms.investor_count !== null && (
+              <div>
+                <span className="text-neutral-500">Investors: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.dealTerms.investor_count.toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.round_date && (
+              <div>
+                <span className="text-neutral-500">Round Date: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.dealTerms.round_date}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.eis_seis_eligible !== null && (
+              <div>
+                <span className="text-neutral-500">EIS/SEIS: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.dealTerms.eis_seis_eligible ? "Eligible" : "No"}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.qualified_institutional !== null && (
+              <div>
+                <span className="text-neutral-500">Institutional: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.dealTerms.qualified_institutional ? "Yes" : "No"}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Comparables */}
       {result.comparables && (

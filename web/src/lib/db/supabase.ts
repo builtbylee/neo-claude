@@ -69,6 +69,41 @@ export async function findCompany(
   return null;
 }
 
+export interface DealTermsRow {
+  instrument_type: string | null;
+  round_type: string | null;
+  amount_raised: number | null;
+  pre_money_valuation: number | null;
+  platform: string | null;
+  round_date: string | null;
+  overfunding_ratio: number | null;
+  investor_count: number | null;
+  funding_velocity_days: number | null;
+  eis_seis_eligible: boolean | null;
+  qsbs_eligible: boolean | null;
+  qualified_institutional: boolean | null;
+}
+
+/**
+ * Load deal terms from the most recent funding round for a company.
+ */
+export async function loadDealTerms(
+  supabase: AnySupabaseClient,
+  companyId: string,
+): Promise<DealTermsRow | null> {
+  const { data } = await supabase
+    .from("funding_rounds")
+    .select(
+      "instrument_type, round_type, amount_raised, pre_money_valuation, platform, round_date, overfunding_ratio, investor_count, funding_velocity_days, eis_seis_eligible, qsbs_eligible, qualified_institutional",
+    )
+    .eq("company_id", companyId)
+    .order("round_date", { ascending: false })
+    .limit(1);
+
+  if (data && data.length > 0) return data[0] as DealTermsRow;
+  return null;
+}
+
 /**
  * Load features for an entity from the training_features_wide matview.
  */

@@ -436,6 +436,12 @@ def ingest_dera_cf_batch(conn: psycopg.Connection, records: list[dict]) -> int:
             amount = rec.get("offering_amount")
             if not amount:
                 continue
+            # Compute overfunding ratio if both amounts available
+            max_amount = rec.get("max_offering_amount")
+            overfunding = None
+            if amount and max_amount and max_amount > 0:
+                overfunding = round(amount / max_amount, 4)
+
             fr_rows.append((
                 company_id,
                 rec.get("filing_date"),
@@ -445,17 +451,20 @@ def ingest_dera_cf_batch(conn: psycopg.Connection, records: list[dict]) -> int:
                 None,  # pre_money_valuation
                 rec.get("platform_name"),
                 "sec_dera_cf",
+                overfunding,
+                rec.get("oversubscription_accepted"),
             ))
 
         if fr_rows:
-            fr_ph = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(fr_rows))
+            fr_ph = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"] * len(fr_rows))
             fr_flat = [v for row in fr_rows for v in row]
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     INSERT INTO funding_rounds (
                         company_id, round_date, round_type, instrument_type,
-                        amount_raised, pre_money_valuation, platform, source
+                        amount_raised, pre_money_valuation, platform, source,
+                        overfunding_ratio, qsbs_eligible
                     ) VALUES {fr_ph}
                     """,
                     fr_flat,

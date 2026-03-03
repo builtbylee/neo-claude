@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { buildProfile, scoreText, type ExtractedFacts } from "@/lib/claude/text-scorer";
 import { generateMemo, identifyMissingFields, type ICMemo, type MissingField } from "@/lib/claude/memo-generator";
-import { findCompany, getSupabaseClient, loadFeatures } from "@/lib/db/supabase";
+import { findCompany, getSupabaseClient, loadFeatures, loadDealTerms, type DealTermsRow } from "@/lib/db/supabase";
 import { scrapeWebsite } from "@/lib/enrichment/website-scraper";
 import { scoreFromKnowledge } from "@/lib/enrichment/knowledge-enrichment";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
@@ -54,6 +54,7 @@ interface QuickScoreResponse {
   memo: ICMemo | null;
   missingFields: MissingField[];
   comparables: ComparablesResult | null;
+  dealTerms: DealTermsRow | null;
 }
 
 export async function POST(request: NextRequest) {
@@ -73,10 +74,19 @@ export async function POST(request: NextRequest) {
   // Step 1: Entity match — look up company in database (optional)
   let company = null;
   let features: CompanyFeatures = {};
+  let dealTerms: DealTermsRow | null = null;
 
   if (supabaseUrl && supabaseKey) {
     const supabase = getSupabaseClient(supabaseUrl, supabaseKey);
     company = await findCompany(supabase, body.companyName);
+
+    if (company?.id) {
+      try {
+        dealTerms = await loadDealTerms(supabase, company.id);
+      } catch {
+        // Deal terms query failed — continue without
+      }
+    }
 
     if (company?.entity_id) {
       const featureRow = await loadFeatures(supabase, company.entity_id);
@@ -351,6 +361,7 @@ export async function POST(request: NextRequest) {
     memo,
     missingFields,
     comparables,
+    dealTerms,
   };
 
   return NextResponse.json(response);

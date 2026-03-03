@@ -1,4 +1,8 @@
-"""Extract terms/pricing-family features from raw company records."""
+"""Extract terms/pricing-family features from raw company records.
+
+Derives additional signals from raw SEC CF data including instrument
+classification, oversubscription status, and pricing metrics.
+"""
 
 from __future__ import annotations
 
@@ -14,8 +18,15 @@ def extract_terms_features(record: dict) -> dict[str, Any]:
     Returns:
         Dict of {feature_name: value} for all terms-family features.
     """
+    instrument = record.get("instrument_type")
+    qualified = record.get("qualified_institutional")
+
+    # If qualified_institutional not directly available, check crowdfunding_outcomes field
+    if qualified is None:
+        qualified = record.get("qualified_institutional_coinvestor")
+
     return {
-        "instrument_type": record.get("instrument_type"),
+        "instrument_type": instrument,
         "valuation_cap": record.get("valuation_cap"),
         "discount_rate": record.get("discount_rate"),
         "mfn_clause": record.get("mfn_clause"),
@@ -23,5 +34,5 @@ def extract_terms_features(record: dict) -> dict[str, Any]:
         "liquidation_participation": record.get("liquidation_participation"),
         "seniority_position": record.get("seniority_position"),
         "pro_rata_rights": record.get("pro_rata_rights"),
-        "qualified_institutional": record.get("qualified_institutional"),
+        "qualified_institutional": qualified,
     }

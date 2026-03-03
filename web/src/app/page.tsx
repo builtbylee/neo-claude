@@ -48,6 +48,20 @@ type ScoreResponse = {
     label: string;
     impact: string;
   }>;
+  dealTerms: {
+    instrument_type: string | null;
+    round_type: string | null;
+    amount_raised: number | null;
+    pre_money_valuation: number | null;
+    platform: string | null;
+    round_date: string | null;
+    overfunding_ratio: number | null;
+    investor_count: number | null;
+    funding_velocity_days: number | null;
+    eis_seis_eligible: boolean | null;
+    qsbs_eligible: boolean | null;
+    qualified_institutional: boolean | null;
+  } | null;
   comparables: {
     cohortStats: {
       sampleSize: number;
