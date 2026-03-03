@@ -183,7 +183,7 @@ export default function AnalystWorkbench({
         setModelHealth(null);
         return;
       }
-      const response = await fetch("/api/model/health", {
+      const response = await fetch("/api/model-health", {
         headers: await buildAuthHeaders(userEmail),
       });
       if (!response.ok) {
