@@ -123,6 +123,12 @@ type ScoreResponse = {
     evidenceOk: boolean;
     lastBacktestDate: string | null;
   } | null;
+  quarterlyEvidence: {
+    reportQuarter: string | null;
+    generatedAt: string | null;
+    releaseReadiness: boolean;
+    isFresh: boolean;
+  } | null;
   sanctions: {
     checked: boolean;
     matched: boolean;

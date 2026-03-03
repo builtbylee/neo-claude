@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { findCompany, loadFeatures } from "@/lib/db/supabase";
+import { findCompany, loadFeatures, loadLatestQuarterlyEvidence } from "@/lib/db/supabase";
 import { resolveRouteContext } from "@/lib/auth/request-context";
 import { canConsumeUsage, recordUsageEvent } from "@/lib/auth/usage-limits";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
@@ -10,6 +10,14 @@ import { computeRubric } from "@/lib/scoring/rubric";
 import modelJson from "@/../public/model/model.json";
 
 const MODEL = modelJson as unknown as ExportedModel;
+
+function currentQuarterStartIso(): string {
+  const now = new Date();
+  const quarterMonth = Math.floor(now.getUTCMonth() / 3) * 3;
+  return new Date(Date.UTC(now.getUTCFullYear(), quarterMonth, 1))
+    .toISOString()
+    .slice(0, 10);
+}
 
 interface BatchItem {
   companyName: string;
@@ -42,6 +50,12 @@ export async function POST(request: NextRequest) {
     );
   }
   const supabase = context.supabase;
+  const latestQuarterlyEvidence = await loadLatestQuarterlyEvidence(supabase);
+  const evidenceQuarter = latestQuarterlyEvidence?.report_quarter?.slice(0, 10) ?? null;
+  const evidenceFresh = Boolean(evidenceQuarter && evidenceQuarter >= currentQuarterStartIso());
+  const canAutoInvest = Boolean(
+    latestQuarterlyEvidence?.release_readiness && evidenceFresh,
+  );
   const output: Array<{
     companyName: string;
     matchedCompany: string | null;
@@ -111,12 +125,17 @@ export async function POST(request: NextRequest) {
       enforceReliabilityGates: false,
     });
     const rec = classify(rubric.overallScore, rubric.confidenceRange, gates);
+    const recommendationLabel = (
+      rec.class === "invest" && !canAutoInvest
+        ? "Deep Diligence (evidence gate)"
+        : rec.label
+    );
 
     output.push({
       companyName: deal.companyName,
       matchedCompany: company?.name ?? null,
       score: rubric.overallScore,
-      recommendation: rec.label,
+      recommendation: recommendationLabel,
       confidenceRange: rubric.confidenceRange,
       dataCompleteness: Math.round(rubric.dataCompleteness * 100),
     });

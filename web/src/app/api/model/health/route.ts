@@ -13,6 +13,14 @@ function asNumber(value: unknown): number | null {
   return null;
 }
 
+function currentQuarterStartIso(): string {
+  const now = new Date();
+  const quarterMonth = Math.floor(now.getUTCMonth() / 3) * 3;
+  return new Date(Date.UTC(now.getUTCFullYear(), quarterMonth, 1))
+    .toISOString()
+    .slice(0, 10);
+}
+
 export async function GET(request: NextRequest) {
   const context = await resolveRouteContext(request);
   if (context instanceof NextResponse) return context;
@@ -110,6 +118,10 @@ export async function GET(request: NextRequest) {
 
   const latestEvidence = evidenceReports?.[0] ?? null;
   const latestValuationCohort = valuationCohorts?.[0] ?? null;
+  const evidenceQuarter = (latestEvidence?.report_quarter as string | null) ?? null;
+  const evidenceFresh = Boolean(
+    evidenceQuarter && evidenceQuarter.slice(0, 10) >= currentQuarterStartIso(),
+  );
 
   return NextResponse.json({
     latestBacktest: latestRun
@@ -177,6 +189,7 @@ export async function GET(request: NextRequest) {
           reportQuarter: (latestEvidence.report_quarter as string | null) ?? null,
           generatedAt: (latestEvidence.generated_at as string | null) ?? null,
           releaseReadiness: Boolean(latestEvidence.release_readiness),
+          isFresh: evidenceFresh,
           artifactPath: (latestEvidence.artifact_path as string | null) ?? null,
         }
       : null,

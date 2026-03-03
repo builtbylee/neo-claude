@@ -202,6 +202,9 @@ export interface SegmentEvidenceRow {
 export interface ValuationAuditInsert {
   company_id: string | null;
   entity_id: string | null;
+  company_name: string | null;
+  sector: string | null;
+  country: string | null;
   evaluation_type: string;
   segment_key: string | null;
   recommendation_class: string | null;
@@ -233,6 +236,13 @@ export interface DealReminderInsert {
   priority: "low" | "medium" | "high" | "critical";
   payload: Record<string, unknown>;
   created_by: string;
+}
+
+export interface QuarterlyEvidenceRow {
+  report_quarter: string;
+  generated_at: string;
+  release_readiness: boolean;
+  artifact_path: string | null;
 }
 
 /**
@@ -278,6 +288,19 @@ export async function loadSegmentEvidence(
     .maybeSingle();
   if (!data) return null;
   return data as SegmentEvidenceRow;
+}
+
+export async function loadLatestQuarterlyEvidence(
+  supabase: AnySupabaseClient,
+): Promise<QuarterlyEvidenceRow | null> {
+  const { data } = await supabase
+    .from("quarterly_evidence_reports")
+    .select("report_quarter, generated_at, release_readiness, artifact_path")
+    .order("report_quarter", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!data) return null;
+  return data as QuarterlyEvidenceRow;
 }
 
 export async function insertValuationScenarioAudit(

@@ -28,6 +28,11 @@ export interface GateCheckInput {
     calibrationEce: number | null;
     releaseGateOpen: boolean;
   } | null;
+  quarterlyEvidence?: {
+    releaseReadiness: boolean;
+    reportQuarter: string | null;
+    isFresh: boolean;
+  } | null;
   // Kill criteria
   directorDisqualified?: boolean;
   underAdministration?: boolean;
@@ -124,6 +129,33 @@ export function checkGates(input: GateCheckInput): GateResult[] {
         ? "Valuation context has sufficient coverage"
         : "Valuation context is low-confidence; escalate to deep diligence",
     });
+
+    // Gate 5: Quarterly evidence freshness and release readiness.
+    if (input.quarterlyEvidence) {
+      const evidenceReady = (
+        input.quarterlyEvidence.releaseReadiness
+        && input.quarterlyEvidence.isFresh
+      );
+      results.push({
+        name: "Quarterly Evidence",
+        passed: evidenceReady,
+        value: input.quarterlyEvidence.reportQuarter,
+        threshold: "release_ready && current quarter",
+        action: evidenceReady ? "pass" : "abstain",
+        reason: evidenceReady
+          ? "Quarterly evidence report is current and release-ready"
+          : "Quarterly evidence is stale or release gate is closed",
+      });
+    } else {
+      results.push({
+        name: "Quarterly Evidence",
+        passed: false,
+        value: null,
+        threshold: "latest quarterly report required",
+        action: "abstain",
+        reason: "No quarterly evidence report available",
+      });
+    }
   }
 
   // Kill criteria

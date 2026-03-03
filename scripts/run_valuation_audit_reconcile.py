@@ -26,7 +26,7 @@ def main(limit: int = typer.Option(2000, help="Max unresolved audits to reconcil
         unresolved = execute_query(
             conn,
             """
-            SELECT id, entity_id, company_id
+            SELECT id, entity_id, company_id, company_name, sector, country
             FROM valuation_scenario_audits
             WHERE realized_moic IS NULL
             ORDER BY created_at ASC
@@ -40,10 +40,53 @@ def main(limit: int = typer.Option(2000, help="Max unresolved audits to reconcil
             audit_id = row["id"]
             entity_id = row.get("entity_id")
             company_id = row.get("company_id")
+            company_name = row.get("company_name")
+            sector = row.get("sector")
+            country = row.get("country")
 
             realized_status = None
             realized_moic = None
             realized_at = None
+
+            if company_id is None and company_name:
+                candidates = execute_query(
+                    conn,
+                    """
+                    SELECT id, entity_id
+                    FROM companies
+                    WHERE lower(name) = lower(%s)
+                    ORDER BY
+                      CASE
+                        WHEN source IN ('sec_dera_cf', 'sec_edgar', 'companies_house') THEN 0
+                        ELSE 1
+                      END,
+                      id
+                    LIMIT 1
+                    """,
+                    (company_name,),
+                )
+                if not candidates:
+                    candidates = execute_query(
+                        conn,
+                        """
+                        SELECT id, entity_id
+                        FROM companies
+                        WHERE name ILIKE %s
+                          AND (%s::text IS NULL OR sector = %s::text)
+                          AND (%s::text IS NULL OR country = %s::text)
+                        ORDER BY
+                          CASE
+                            WHEN source IN ('sec_dera_cf', 'sec_edgar', 'companies_house') THEN 0
+                            ELSE 1
+                          END,
+                          id
+                        LIMIT 1
+                        """,
+                        (f"%{company_name}%", sector, sector, country, country),
+                    )
+                if candidates:
+                    company_id = candidates[0].get("id")
+                    entity_id = entity_id or candidates[0].get("entity_id")
 
             if entity_id:
                 inv = execute_query(
@@ -94,6 +137,8 @@ def main(limit: int = typer.Option(2000, help="Max unresolved audits to reconcil
                 """
                 UPDATE valuation_scenario_audits
                 SET
+                    company_id = COALESCE(company_id, %s),
+                    entity_id = COALESCE(entity_id, %s),
                     realized_status = %s,
                     realized_moic = %s,
                     realized_at = %s,
@@ -103,7 +148,15 @@ def main(limit: int = typer.Option(2000, help="Max unresolved audits to reconcil
                     END
                 WHERE id = %s
                 """,
-                (realized_status, realized_moic, realized_at, realized_moic, audit_id),
+                (
+                    company_id,
+                    entity_id,
+                    realized_status,
+                    realized_moic,
+                    realized_at,
+                    realized_moic,
+                    audit_id,
+                ),
             )
             updated += 1
 

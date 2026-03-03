@@ -20,6 +20,7 @@ import {
   loadFeatureProvenance,
   loadRegulatoryData,
   loadSegmentEvidence,
+  loadLatestQuarterlyEvidence,
   insertValuationScenarioAudit,
   insertSanctionsScreening,
   type DealTermsRow,
@@ -38,6 +39,14 @@ import { computeValuationScenario } from "@/lib/scoring/valuation";
 import modelJson from "@/../public/model/model.json";
 
 const MODEL = modelJson as unknown as ExportedModel;
+
+function currentQuarterStartIso(): string {
+  const now = new Date();
+  const quarterMonth = Math.floor(now.getUTCMonth() / 3) * 3;
+  return new Date(Date.UTC(now.getUTCFullYear(), quarterMonth, 1))
+    .toISOString()
+    .slice(0, 10);
+}
 
 interface QuickScoreRequest {
   companyName: string;
@@ -113,6 +122,12 @@ interface QuickScoreResponse {
     evidenceOk: boolean;
     lastBacktestDate: string | null;
   } | null;
+  quarterlyEvidence: {
+    reportQuarter: string | null;
+    generatedAt: string | null;
+    releaseReadiness: boolean;
+    isFresh: boolean;
+  } | null;
   sanctions: {
     checked: boolean;
     matched: boolean;
@@ -173,6 +188,7 @@ export async function POST(request: NextRequest) {
   let provenance: QuickScoreResponse["provenance"] = null;
   let regulatoryStatus: { companyStatus: string | null; companyNumber: string | null } | null = null;
   let segmentEvidence: QuickScoreResponse["segmentEvidence"] = null;
+  let quarterlyEvidence: QuickScoreResponse["quarterlyEvidence"] = null;
   let sanctions: QuickScoreResponse["sanctions"] = {
     checked: false,
     matched: false,
@@ -414,6 +430,22 @@ export async function POST(request: NextRequest) {
     // Segment evidence unavailable — gate will abstain
   }
 
+  try {
+    const latest = await loadLatestQuarterlyEvidence(supabase);
+    if (latest) {
+      const currentQuarter = currentQuarterStartIso();
+      const reportQuarter = latest.report_quarter?.slice(0, 10) ?? null;
+      quarterlyEvidence = {
+        reportQuarter,
+        generatedAt: latest.generated_at ?? null,
+        releaseReadiness: Boolean(latest.release_readiness),
+        isFresh: Boolean(reportQuarter && reportQuarter >= currentQuarter),
+      };
+    }
+  } catch {
+    // Quarterly evidence unavailable — gate will abstain
+  }
+
   if (process.env.ENABLE_SANCTIONS_SCREENING === "true") {
     try {
       sanctions = await screenNameAgainstSanctions(body.companyName);
@@ -535,7 +567,14 @@ export async function POST(request: NextRequest) {
           sampleSize: segmentEvidence.sampleSize,
           survivalAuc: segmentEvidence.survivalAuc,
           calibrationEce: segmentEvidence.calibrationEce,
-          releaseGateOpen: segmentEvidence.releaseGateOpen,
+        releaseGateOpen: segmentEvidence.releaseGateOpen,
+      }
+      : null,
+    quarterlyEvidence: quarterlyEvidence
+      ? {
+          releaseReadiness: quarterlyEvidence.releaseReadiness,
+          reportQuarter: quarterlyEvidence.reportQuarter,
+          isFresh: quarterlyEvidence.isFresh,
         }
       : null,
     sanctionsMatch: sanctions.matched,
@@ -630,6 +669,9 @@ export async function POST(request: NextRequest) {
       valuation_confidence: valuationConfidence,
       valuation_confidence_reason: valuationConfidenceReason,
       valuation_source_summary: comparables?.sourceSummary ?? null,
+      company_name: body.companyName.trim(),
+      sector: body.sector ?? company?.sector ?? null,
+      country: (features.country as string) ?? company?.country ?? null,
       entry_multiple: valuationScenario?.entryMultiple ?? null,
       bear_moic: valuationScenario?.bearMoic ?? null,
       base_moic: valuationScenario?.baseMoic ?? null,
@@ -688,6 +730,7 @@ export async function POST(request: NextRequest) {
     valuationConfidence,
     valuationConfidenceReason,
     segmentEvidence,
+    quarterlyEvidence,
     sanctions,
     regulatoryStatus,
     usage: {

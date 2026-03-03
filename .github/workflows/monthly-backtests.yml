@@ -1,0 +1,33 @@
+name: Monthly Segment Backtests
+
+on:
+  schedule:
+    - cron: '30 6 1 * *'
+  workflow_dispatch:
+
+jobs:
+  backtests:
+    runs-on: ubuntu-latest
+    env:
+      SL_DATABASE_URL: ${{ secrets.SL_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Apply database migrations
+        run: python scripts/run_db_migrations.py
+
+      - name: Refresh holdout quarantine
+        run: python scripts/run_quarantine_holdout.py 2023-2025 --test-start 2023-01-01 --test-end 2025-12-31
+
+      - name: Run all family backtests and evidence pipeline
+        run: python scripts/run_all_family_backtests.py

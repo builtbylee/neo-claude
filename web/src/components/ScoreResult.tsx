@@ -116,6 +116,12 @@ interface ScoreResultProps {
       evidenceOk: boolean;
       lastBacktestDate: string | null;
     } | null;
+    quarterlyEvidence: {
+      reportQuarter: string | null;
+      generatedAt: string | null;
+      releaseReadiness: boolean;
+      isFresh: boolean;
+    } | null;
     sanctions: {
       checked: boolean;
       matched: boolean;
@@ -318,11 +324,24 @@ export default function ScoreResult({ result }: ScoreResultProps) {
         </div>
       )}
 
-      {(result.segmentEvidence || result.sanctions.checked) && (
+      {(result.segmentEvidence || result.quarterlyEvidence || result.sanctions.checked) && (
         <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
           <h3 className="text-sm font-semibold text-neutral-300 mb-3">
             Reliability & Compliance
           </h3>
+          {result.quarterlyEvidence && (
+            <div className="text-xs text-neutral-400 mb-3">
+              Quarterly evidence: {result.quarterlyEvidence.reportQuarter ?? "n/a"}
+              {" · "}
+              <span className={result.quarterlyEvidence.releaseReadiness ? "text-green-300" : "text-amber-300"}>
+                {result.quarterlyEvidence.releaseReadiness ? "release-ready" : "not release-ready"}
+              </span>
+              {" · "}
+              <span className={result.quarterlyEvidence.isFresh ? "text-green-300" : "text-amber-300"}>
+                {result.quarterlyEvidence.isFresh ? "current quarter" : "stale quarter"}
+              </span>
+            </div>
+          )}
           {result.segmentEvidence && (
             <div className="text-xs text-neutral-400 mb-3">
               Segment {result.segmentEvidence.segmentKey}: n={result.segmentEvidence.sampleSize}
