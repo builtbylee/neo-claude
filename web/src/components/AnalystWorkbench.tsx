@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { buildAuthHeaders } from "@/lib/auth/client-headers";
+
 type DealItem = {
   id: string;
   company_name: string;
@@ -50,9 +52,37 @@ const STATUS_OPTIONS = ["new", "screening", "diligence", "ic", "pass", "invest"]
 
 interface AnalystWorkbenchProps {
   userEmail: string;
+  authEnabled: boolean;
+  isAuthenticated: boolean;
 }
 
-export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
+type ModelHealth = {
+  latestBacktest: {
+    runDate: string | null;
+    allPassed: boolean;
+    survivalAuc: number | null;
+    calibrationEce: number | null;
+    qualityVsRandom: number | null;
+  } | null;
+  latestModel: {
+    family: string | null;
+    version: string | null;
+    trainedAt: string | null;
+    releaseStatus: string | null;
+    daysSinceTrain: number | null;
+  } | null;
+  checks: {
+    calibrationHealthy: boolean;
+    releaseGateOpen: boolean;
+    retrainRecommended: boolean;
+  };
+};
+
+export default function AnalystWorkbench({
+  userEmail,
+  authEnabled,
+  isAuthenticated,
+}: AnalystWorkbenchProps) {
   const [deals, setDeals] = useState<DealItem[]>([]);
   const [loadingDeals, setLoadingDeals] = useState(false);
   const [batchInput, setBatchInput] = useState("");
@@ -64,6 +94,7 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [taskTitle, setTaskTitle] = useState("");
   const [commentBody, setCommentBody] = useState("");
+  const [modelHealth, setModelHealth] = useState<ModelHealth | null>(null);
 
   const stats = useMemo(() => {
     const byStatus = new Map<string, number>();
@@ -82,9 +113,15 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
   );
 
   async function refreshDeals() {
+    if (authEnabled && !isAuthenticated) {
+      setDeals([]);
+      return;
+    }
     setLoadingDeals(true);
     try {
-      const resp = await fetch("/api/deals");
+      const resp = await fetch("/api/deals", {
+        headers: await buildAuthHeaders(userEmail),
+      });
       const data = (await resp.json()) as { deals?: DealItem[] };
       const nextDeals = data.deals ?? [];
       setDeals(nextDeals);
@@ -97,7 +134,13 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
   }
 
   async function refreshSelected(dealId: string) {
-    const headers = { "x-user-email": userEmail };
+    if (authEnabled && !isAuthenticated) {
+      setTasks([]);
+      setComments([]);
+      setEvents([]);
+      return;
+    }
+    const headers = await buildAuthHeaders(userEmail);
     const [tasksResp, commentsResp, eventsResp] = await Promise.all([
       fetch(`/api/deals/${dealId}/tasks`, { headers }),
       fetch(`/api/deals/${dealId}/comments`, { headers }),
@@ -113,21 +156,37 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
 
   useEffect(() => {
     void refreshDeals();
-  }, []);
+  }, [authEnabled, isAuthenticated, userEmail]);
 
   useEffect(() => {
     if (selectedDealId) {
       void refreshSelected(selectedDealId);
     }
-  }, [selectedDealId, userEmail]);
+  }, [selectedDealId, userEmail, authEnabled, isAuthenticated]);
+
+  useEffect(() => {
+    async function refreshModelHealth() {
+      if (authEnabled && !isAuthenticated) {
+        setModelHealth(null);
+        return;
+      }
+      const response = await fetch("/api/model/health", {
+        headers: await buildAuthHeaders(userEmail),
+      });
+      if (!response.ok) {
+        setModelHealth(null);
+        return;
+      }
+      const data = (await response.json()) as ModelHealth;
+      setModelHealth(data);
+    }
+    void refreshModelHealth();
+  }, [authEnabled, isAuthenticated, userEmail]);
 
   async function updateStatus(id: string, status: string) {
     await fetch(`/api/deals/${id}`, {
       method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        "x-user-email": userEmail,
-      },
+      headers: await buildAuthHeaders(userEmail, "json"),
       body: JSON.stringify({ status, ownerEmail: userEmail }),
     });
     await refreshDeals();
@@ -144,7 +203,7 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
     try {
       const resp = await fetch("/api/score/batch", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-user-email": userEmail },
+        headers: await buildAuthHeaders(userEmail, "json"),
         body: JSON.stringify({
           deals: names.map((name) => ({ companyName: name })),
         }),
@@ -159,10 +218,7 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
   async function addToPipeline(item: BatchResult) {
     await fetch("/api/deals", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-user-email": userEmail,
-      },
+      headers: await buildAuthHeaders(userEmail, "json"),
       body: JSON.stringify({
         companyName: item.companyName,
         recommendationClass: item.recommendation.toLowerCase().replace(/\s+/g, "_"),
@@ -179,10 +235,7 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
     if (!selectedDealId || !taskTitle.trim()) return;
     await fetch(`/api/deals/${selectedDealId}/tasks`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-user-email": userEmail,
-      },
+      headers: await buildAuthHeaders(userEmail, "json"),
       body: JSON.stringify({
         title: taskTitle.trim(),
         assigneeEmail: userEmail,
@@ -197,10 +250,7 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
     if (!selectedDealId || !commentBody.trim()) return;
     await fetch(`/api/deals/${selectedDealId}/comments`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-user-email": userEmail,
-      },
+      headers: await buildAuthHeaders(userEmail, "json"),
       body: JSON.stringify({ body: commentBody.trim(), authorEmail: userEmail }),
     });
     setCommentBody("");
@@ -211,10 +261,7 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
     if (!selectedDealId) return;
     await fetch(`/api/deals/${selectedDealId}/approve`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-user-email": userEmail,
-      },
+      headers: await buildAuthHeaders(userEmail, "json"),
       body: JSON.stringify({
         requestedBy: userEmail,
         approverEmail: userEmail,
@@ -246,6 +293,63 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
           </div>
         </div>
       </div>
+
+      {modelHealth && (
+        <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-5">
+          <h4 className="mb-3 text-sm font-semibold text-neutral-200">
+            Model Governance
+          </h4>
+          <div className="grid gap-3 text-xs text-neutral-400 sm:grid-cols-3">
+            <div>
+              <div className="text-neutral-500">Latest AUC</div>
+              <div className="text-neutral-200">
+                {modelHealth.latestBacktest?.survivalAuc ?? "n/a"}
+              </div>
+            </div>
+            <div>
+              <div className="text-neutral-500">Latest ECE</div>
+              <div className="text-neutral-200">
+                {modelHealth.latestBacktest?.calibrationEce ?? "n/a"}
+              </div>
+            </div>
+            <div>
+              <div className="text-neutral-500">Model Age (days)</div>
+              <div className="text-neutral-200">
+                {modelHealth.latestModel?.daysSinceTrain ?? "n/a"}
+              </div>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+            <span
+              className={`rounded px-2 py-1 ${
+                modelHealth.checks.releaseGateOpen
+                  ? "bg-green-900/40 text-green-300"
+                  : "bg-red-900/40 text-red-300"
+              }`}
+            >
+              Release Gate {modelHealth.checks.releaseGateOpen ? "Open" : "Blocked"}
+            </span>
+            <span
+              className={`rounded px-2 py-1 ${
+                modelHealth.checks.calibrationHealthy
+                  ? "bg-green-900/40 text-green-300"
+                  : "bg-amber-900/40 text-amber-300"
+              }`}
+            >
+              Calibration {modelHealth.checks.calibrationHealthy ? "Healthy" : "Warning"}
+            </span>
+            <span
+              className={`rounded px-2 py-1 ${
+                modelHealth.checks.retrainRecommended
+                  ? "bg-amber-900/40 text-amber-300"
+                  : "bg-neutral-800 text-neutral-300"
+              }`}
+            >
+              Retrain {modelHealth.checks.retrainRecommended ? "Recommended" : "Not Required"}
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-5">
@@ -453,4 +557,3 @@ export default function AnalystWorkbench({ userEmail }: AnalystWorkbenchProps) {
     </section>
   );
 }
-

@@ -94,6 +94,15 @@ interface ScoreResultProps {
         stalenessDays: number;
       }>;
     } | null;
+    valuationScenario: {
+      entryMultiple: number;
+      cohortMedianMultiple: number | null;
+      dilutionRetention: number;
+      bearMoic: number;
+      baseMoic: number;
+      bullMoic: number;
+      notes: string[];
+    } | null;
     comparables: {
       cohortStats: {
         sampleSize: number;
@@ -116,7 +125,14 @@ interface ScoreResultProps {
         cohortMedianMultiple: number;
         signal: "attractive" | "fair" | "aggressive";
         note: string;
+        dataSource: "pricing_cohort" | "outcome_cohort";
+        sampleSize: number;
       } | null;
+      sourceSummary: {
+        outcomeSampleSize: number;
+        pricingSampleSize: number;
+      };
+      sourceConfidence: "low" | "medium" | "high";
       nearestDeals: Array<{
         name: string;
         sector: string | null;
@@ -537,7 +553,13 @@ export default function ScoreResult({ result }: ScoreResultProps) {
             Comparables
           </h3>
           <p className="text-xs text-neutral-500 mb-4">
-            Based on {result.comparables.cohortStats.sampleSize.toLocaleString()} {result.comparables.cohortLabel} (n={result.comparables.cohortStats.sampleSize})
+            Based on {result.comparables.cohortLabel}
+            {" · "}
+            confidence {result.comparables.sourceConfidence}
+            {" · "}
+            outcome n={result.comparables.sourceSummary.outcomeSampleSize.toLocaleString()}
+            {" · "}
+            pricing n={result.comparables.sourceSummary.pricingSampleSize.toLocaleString()}
           </p>
 
           {/* Cohort base rates */}
@@ -647,7 +669,42 @@ export default function ScoreResult({ result }: ScoreResultProps) {
               </div>
               <p className="text-xs text-neutral-500">
                 {result.comparables.valuationContext.note}
+                {" "}
+                (source: {result.comparables.valuationContext.dataSource.replace(/_/g, " ")},
+                n={result.comparables.valuationContext.sampleSize})
               </p>
+            </div>
+          )}
+
+          {result.valuationScenario && (
+            <div className="rounded-lg border border-neutral-700/50 bg-neutral-900/40 p-4 mb-4">
+              <h4 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-2">
+                Scenario Returns (MOIC)
+              </h4>
+              <div className="grid grid-cols-3 gap-3 text-sm mb-2">
+                <div>
+                  <span className="text-neutral-500">Bear: </span>
+                  <span className="text-neutral-200">{result.valuationScenario.bearMoic.toFixed(2)}x</span>
+                </div>
+                <div>
+                  <span className="text-neutral-500">Base: </span>
+                  <span className="text-neutral-200">{result.valuationScenario.baseMoic.toFixed(2)}x</span>
+                </div>
+                <div>
+                  <span className="text-neutral-500">Bull: </span>
+                  <span className="text-neutral-200">{result.valuationScenario.bullMoic.toFixed(2)}x</span>
+                </div>
+              </div>
+              <div className="text-xs text-neutral-500 space-y-1">
+                <div>
+                  Entry multiple {result.valuationScenario.entryMultiple.toFixed(1)}x
+                  {" · "}
+                  retained ownership {Math.round(result.valuationScenario.dilutionRetention * 100)}%
+                </div>
+                {result.valuationScenario.notes.map((note, idx) => (
+                  <div key={`${note}-${idx}`}>{note}</div>
+                ))}
+              </div>
             </div>
           )}
 

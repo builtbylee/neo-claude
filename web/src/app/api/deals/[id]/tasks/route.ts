@@ -1,21 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getSupabaseClient } from "@/lib/db/supabase";
-import { getActorEmail } from "@/lib/request-user";
-
-function getClient() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
-  return getSupabaseClient(url, key);
-}
+import {
+  requireAtLeastAnalyst,
+  resolveRouteContext,
+} from "@/lib/auth/request-context";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const supabase = getClient();
-  if (!supabase) return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) return context;
+  const { supabase } = context;
   const { id } = await params;
   const { data, error } = await supabase
     .from("diligence_tasks")
@@ -30,8 +26,11 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const supabase = getClient();
-  if (!supabase) return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) return context;
+  const roleError = requireAtLeastAnalyst(context);
+  if (roleError) return roleError;
+  const { supabase, actorEmail } = context;
   const { id } = await params;
   const body = (await request.json()) as {
     title: string;
@@ -43,7 +42,6 @@ export async function POST(
   if (!body.title?.trim()) {
     return NextResponse.json({ error: "title is required" }, { status: 400 });
   }
-  const actorEmail = getActorEmail(request, body.assigneeEmail ?? null);
   const { data, error } = await supabase
     .from("diligence_tasks")
     .insert({
@@ -51,7 +49,7 @@ export async function POST(
       title: body.title.trim(),
       details: body.details ?? null,
       due_date: body.dueDate ?? null,
-      assignee_email: actorEmail,
+      assignee_email: body.assigneeEmail?.trim() || actorEmail,
       evidence_required: body.evidenceRequired ?? false,
     })
     .select("*")

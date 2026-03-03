@@ -1,20 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getSupabaseClient } from "@/lib/db/supabase";
-import { getActorEmail } from "@/lib/request-user";
+import {
+  requireAtLeastAnalyst,
+  resolveRouteContext,
+} from "@/lib/auth/request-context";
 
-function getClient() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
-  return getSupabaseClient(url, key);
-}
-
-export async function GET() {
-  const supabase = getClient();
-  if (!supabase) {
-    return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
+export async function GET(request: NextRequest) {
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) {
+    return context;
   }
+  const { supabase } = context;
 
   const { data, error } = await supabase
     .from("deal_pipeline_items")
@@ -28,10 +24,13 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const supabase = getClient();
-  if (!supabase) {
-    return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) {
+    return context;
   }
+  const roleError = requireAtLeastAnalyst(context);
+  if (roleError) return roleError;
+  const { supabase, actorEmail } = context;
 
   const body = (await request.json()) as {
     evaluationId?: string | null;
@@ -51,8 +50,6 @@ export async function POST(request: NextRequest) {
   if (!body.companyName?.trim()) {
     return NextResponse.json({ error: "companyName is required" }, { status: 400 });
   }
-  const actorEmail = getActorEmail(request, body.ownerEmail ?? null);
-
   const payload = {
     evaluation_id: body.evaluationId ?? null,
     entity_id: body.entityId ?? null,
@@ -64,7 +61,7 @@ export async function POST(request: NextRequest) {
     conviction_score: body.convictionScore ?? null,
     status: body.status ?? "new",
     priority: body.priority ?? "medium",
-    owner_email: actorEmail,
+    owner_email: body.ownerEmail?.trim() || actorEmail,
     next_action_date: body.nextActionDate ?? null,
   };
 

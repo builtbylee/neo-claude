@@ -1,22 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getSupabaseClient } from "@/lib/db/supabase";
-
-function getClient() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
-  return getSupabaseClient(url, key);
-}
+import { resolveRouteContext } from "@/lib/auth/request-context";
 
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const supabase = getClient();
-  if (!supabase) {
-    return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
-  }
+  const context = await resolveRouteContext(_request);
+  if (context instanceof NextResponse) return context;
+  const { supabase } = context;
   const { id } = await params;
   const { data: dealEvents, error: dealError } = await supabase
     .from("activity_events")

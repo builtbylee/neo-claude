@@ -1,21 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getSupabaseClient } from "@/lib/db/supabase";
-import { getActorEmail } from "@/lib/request-user";
-
-function getClient() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
-  return getSupabaseClient(url, key);
-}
+import {
+  requireAtLeastAnalyst,
+  resolveRouteContext,
+} from "@/lib/auth/request-context";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const supabase = getClient();
-  if (!supabase) return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) return context;
+  const { supabase } = context;
   const { id } = await params;
   const { data, error } = await supabase
     .from("deal_comments")
@@ -30,20 +26,22 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const supabase = getClient();
-  if (!supabase) return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) return context;
+  const roleError = requireAtLeastAnalyst(context);
+  if (roleError) return roleError;
+  const { supabase, actorEmail } = context;
   const { id } = await params;
   const body = (await request.json()) as { body: string; authorEmail?: string };
   if (!body.body?.trim()) {
     return NextResponse.json({ error: "body is required" }, { status: 400 });
   }
-  const actorEmail = getActorEmail(request, body.authorEmail ?? null);
   const { data, error } = await supabase
     .from("deal_comments")
     .insert({
       deal_id: id,
       body: body.body.trim(),
-      author_email: actorEmail,
+      author_email: body.authorEmail?.trim() || actorEmail,
     })
     .select("*")
     .single();

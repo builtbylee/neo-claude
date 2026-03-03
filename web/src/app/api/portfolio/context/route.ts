@@ -1,17 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getSupabaseClient } from "@/lib/db/supabase";
-
-function getClient() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
-  return getSupabaseClient(url, key);
-}
+import { resolveRouteContext } from "@/lib/auth/request-context";
 
 export async function GET(request: NextRequest) {
-  const supabase = getClient();
-  if (!supabase) return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) return context;
+  const { supabase } = context;
 
   const sector = request.nextUrl.searchParams.get("sector");
   const { data: investments, error } = await supabase

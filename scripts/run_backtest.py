@@ -493,6 +493,46 @@ def main(
             notes=f"Walk-forward backtest with HistGBT model ({n_model} windows trained)",
         )
 
+        # Persist a compact governance snapshot for UI monitoring.
+        try:
+            execute_query(
+                conn,
+                """
+                INSERT INTO model_health_snapshots (
+                    model_version_id,
+                    backtest_run_id,
+                    survival_auc,
+                    calibration_ece,
+                    portfolio_quality_vs_random,
+                    release_gate_open,
+                    calibration_healthy,
+                    retrain_recommended,
+                    notes
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    None,
+                    run_id,
+                    None if math.isnan(avg_model_auc) else avg_model_auc,
+                    None if math.isnan(avg_model_ece) else avg_model_ece,
+                    None if math.isnan(avg_quality_vs_random) else avg_quality_vs_random,
+                    all_passed,
+                    (
+                        not math.isnan(avg_model_ece)
+                        and avg_model_ece <= 0.08
+                    ),
+                    (
+                        math.isnan(avg_model_auc)
+                        or avg_model_auc < 0.65
+                        or (not math.isnan(avg_model_ece) and avg_model_ece > 0.1)
+                    ),
+                    f"Auto-snapshot for family {model_family}",
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("model_health_snapshot_insert_failed")
+
         conn.commit()
         logger.info(
             "backtest_complete",

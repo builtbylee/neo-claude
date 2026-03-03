@@ -1,10 +1,9 @@
 /**
- * Comparables engine — finds similar crowdfunding deals and computes
- * cohort statistics for context.
+ * Comparables engine — combines:
+ * 1) outcome cohorts (crowdfunding_outcomes) for survival/failure base rates
+ * 2) broader pricing cohorts (training_features_wide) for valuation multiples
  *
- * Queries crowdfunding_outcomes via Supabase to find deals in the same
- * sector/country/stage, then computes base rates and surfaces the
- * nearest neighbors.
+ * This improves valuation context breadth while keeping free-data constraints.
  */
 
 import { type SupabaseClient } from "@supabase/supabase-js";
@@ -40,22 +39,29 @@ export interface Comparable {
   campaignDate: string | null;
 }
 
-export interface ComparablesResult {
-  cohortStats: CohortStats;
-  cohortLabel: string;
-  nearestDeals: Comparable[];
-  valuationContext: ValuationContext | null;
-}
-
 export interface ValuationContext {
   valuationPercentile: number;
   impliedRevenueMultiple: number;
   cohortMedianMultiple: number;
   signal: "attractive" | "fair" | "aggressive";
   note: string;
+  dataSource: "pricing_cohort" | "outcome_cohort";
+  sampleSize: number;
 }
 
-interface CohortRow {
+export interface ComparablesResult {
+  cohortStats: CohortStats;
+  cohortLabel: string;
+  nearestDeals: Comparable[];
+  valuationContext: ValuationContext | null;
+  sourceSummary: {
+    outcomeSampleSize: number;
+    pricingSampleSize: number;
+  };
+  sourceConfidence: "low" | "medium" | "high";
+}
+
+interface OutcomeCohortRow {
   company_id: string;
   sector: string | null;
   country: string | null;
@@ -74,16 +80,29 @@ interface CohortRow {
   company_name: string | null;
 }
 
+interface PricingCohortRow {
+  entity_id: string;
+  sector: string | null;
+  country: string | null;
+  pre_money_valuation: number | null;
+  revenue_at_raise: number | null;
+}
+
 interface CohortFilters {
   sector?: string | null;
   country?: string | null;
   stageBucket?: string | null;
 }
 
-type CohortQueryFn = (
+type OutcomeQueryFn = (
   supabase: AnySupabaseClient,
   filters: CohortFilters,
-) => Promise<CohortRow[]>;
+) => Promise<OutcomeCohortRow[]>;
+
+type PricingQueryFn = (
+  supabase: AnySupabaseClient,
+  filters: CohortFilters,
+) => Promise<PricingCohortRow[]>;
 
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
@@ -94,7 +113,11 @@ function median(values: number[]): number | null {
     : sorted[mid];
 }
 
-function computeStats(rows: CohortRow[]): CohortStats {
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function computeStats(rows: OutcomeCohortRow[]): CohortStats {
   const total = rows.length;
   if (total === 0) {
     return {
@@ -150,55 +173,47 @@ function computeStats(rows: CohortRow[]): CohortStats {
 
   return {
     sampleSize: total,
-    failureRate: Math.round((failed / total) * 100) / 100,
-    survivalRate: Math.round((trading / total) * 100) / 100,
-    exitRate: Math.round((exited / total) * 100) / 100,
+    failureRate: clamp01(failed / total),
+    survivalRate: clamp01(trading / total),
+    exitRate: clamp01(exited / total),
     medianPreMoneyValuation: median(preMoneyVals),
     medianRevenueMultiple: median(revenueMultiples),
     medianFundingTarget: median(fundingTargets),
     medianRevenueAtRaise: median(revenues),
     medianCompanyAgeMonths: median(ages),
     medianOverfundingRatio: median(overfunding),
-    pctWithInstitutional: Math.round((institutional / total) * 100) / 100,
-    pctPreRevenue: Math.round((preRevenue / total) * 100) / 100,
+    pctWithInstitutional: clamp01(institutional / total),
+    pctPreRevenue: clamp01(preRevenue / total),
   };
 }
 
-function computeValuationContext(
-  rows: CohortRow[],
+function buildValuationContext(
+  multiples: number[],
   input: { preMoneyValuation?: number | null; revenue?: number | null },
+  dataSource: ValuationContext["dataSource"],
 ): ValuationContext | null {
   if (!input.preMoneyValuation || !input.revenue || input.revenue <= 0) {
     return null;
   }
+  if (multiples.length < 20) return null;
 
   const impliedRevenueMultiple = input.preMoneyValuation / input.revenue;
   if (!isFinite(impliedRevenueMultiple) || impliedRevenueMultiple <= 0) return null;
 
-  const cohortMultiples = rows
-    .map((r) => {
-      if (!r.pre_money_valuation || !r.revenue_at_raise || r.revenue_at_raise <= 0) {
-        return null;
-      }
-      return r.pre_money_valuation / r.revenue_at_raise;
-    })
-    .filter((v): v is number => v !== null && isFinite(v) && v > 0);
-
-  if (cohortMultiples.length < 20) return null;
-
-  const lessOrEqual = cohortMultiples.filter((m) => m <= impliedRevenueMultiple).length;
-  const valuationPercentile = Math.round((lessOrEqual / cohortMultiples.length) * 100);
-  const cohortMedianMultiple = median(cohortMultiples);
+  const sorted = [...multiples].sort((a, b) => a - b);
+  const lessOrEqual = sorted.filter((m) => m <= impliedRevenueMultiple).length;
+  const valuationPercentile = Math.round((lessOrEqual / sorted.length) * 100);
+  const cohortMedianMultiple = median(sorted);
   if (cohortMedianMultiple === null) return null;
 
   let signal: ValuationContext["signal"] = "fair";
-  let note = "Valuation is near the cohort middle.";
+  let note = "Pricing is near the cohort midpoint.";
   if (valuationPercentile >= 75) {
     signal = "aggressive";
-    note = "Valuation is in the upper quartile vs comparable deals.";
+    note = "Pricing is in the upper quartile vs comparable deals.";
   } else if (valuationPercentile <= 30) {
     signal = "attractive";
-    note = "Valuation is in the lower third vs comparable deals.";
+    note = "Pricing is in the lower third vs comparable deals.";
   }
 
   return {
@@ -207,16 +222,14 @@ function computeValuationContext(
     cohortMedianMultiple: Math.round(cohortMedianMultiple * 10) / 10,
     signal,
     note,
+    dataSource,
+    sampleSize: sorted.length,
   };
 }
 
-/**
- * Compute distance between a target deal and a cohort row for nearest-neighbor ranking.
- * Uses normalised absolute differences on available numeric fields.
- */
 function dealDistance(
   target: { fundingTarget?: number | null; companyAge?: number | null; revenue?: number | null },
-  row: CohortRow,
+  row: OutcomeCohortRow,
 ): number {
   let dist = 0;
   let fields = 0;
@@ -239,13 +252,19 @@ function dealDistance(
   return fields > 0 ? dist / fields : 999;
 }
 
-/**
- * Run a cohort query with the given filters.
- */
+function inferConfidence(
+  outcomeSampleSize: number,
+  pricingSampleSize: number,
+): "low" | "medium" | "high" {
+  if (outcomeSampleSize >= 200 && pricingSampleSize >= 400) return "high";
+  if (outcomeSampleSize >= 50 && pricingSampleSize >= 120) return "medium";
+  return "low";
+}
+
 export async function queryCohort(
   supabase: AnySupabaseClient,
   filters: CohortFilters,
-): Promise<CohortRow[]> {
+): Promise<OutcomeCohortRow[]> {
   const selectFields =
     "company_id, sector, country, stage_bucket, platform, campaign_date, funding_target, amount_raised, overfunding_ratio, pre_money_valuation, company_age_at_raise_months, had_revenue, revenue_at_raise, qualified_institutional_coinvestor, outcome, companies(name)";
 
@@ -256,20 +275,13 @@ export async function queryCohort(
     .in("outcome", ["failed", "trading", "exited"])
     .order("campaign_date", { ascending: false })
     .order("company_id", { ascending: true })
-    .limit(1000);
+    .limit(1500);
 
-  if (filters.sector) {
-    query = query.eq("sector", filters.sector);
-  }
-  if (filters.country) {
-    query = query.eq("country", filters.country);
-  }
-  if (filters.stageBucket) {
-    query = query.eq("stage_bucket", filters.stageBucket);
-  }
+  if (filters.sector) query = query.eq("sector", filters.sector);
+  if (filters.country) query = query.eq("country", filters.country);
+  if (filters.stageBucket) query = query.eq("stage_bucket", filters.stageBucket);
 
   const { data, error } = await query;
-
   if (error || !data) return [];
 
   return data.map((r: Record<string, unknown>) => ({
@@ -292,15 +304,36 @@ export async function queryCohort(
   }));
 }
 
-/**
- * Find comparable deals and compute cohort statistics.
- *
- * Progressively relaxes filters if the initial cohort is too small:
- * 1. sector + country
- * 2. sector only
- * 3. country only
- * 4. all deals
- */
+export async function queryPricingCohort(
+  supabase: AnySupabaseClient,
+  filters: CohortFilters,
+): Promise<PricingCohortRow[]> {
+  let query = supabase
+    .from("training_features_wide")
+    .select("entity_id, sector, country, pre_money_valuation, revenue_at_raise")
+    .not("pre_money_valuation", "is", null)
+    .not("revenue_at_raise", "is", null)
+    .gt("pre_money_valuation", 0)
+    .gt("revenue_at_raise", 0)
+    .order("as_of_date", { ascending: false })
+    .limit(5000);
+
+  if (filters.sector) query = query.eq("sector", filters.sector);
+  if (filters.country) query = query.eq("country", filters.country);
+  // stage bucket is not reliably present in the wide feature matview yet.
+
+  const { data, error } = await query;
+  if (error || !data) return [];
+
+  return (data as Record<string, unknown>[]).map((r) => ({
+    entity_id: r.entity_id as string,
+    sector: r.sector as string | null,
+    country: r.country as string | null,
+    pre_money_valuation: r.pre_money_valuation as number | null,
+    revenue_at_raise: r.revenue_at_raise as number | null,
+  }));
+}
+
 export async function findComparables(
   supabase: AnySupabaseClient,
   input: {
@@ -315,18 +348,17 @@ export async function findComparables(
   },
   options?: {
     minCohort?: number;
-    queryCohortFn?: CohortQueryFn;
+    queryCohortFn?: OutcomeQueryFn;
+    queryPricingCohortFn?: PricingQueryFn;
   },
 ): Promise<ComparablesResult | null> {
   const minCohort = options?.minCohort ?? 20;
   const queryCohortFn = options?.queryCohortFn ?? queryCohort;
-
-  const attempts: Array<{
-    label: string;
-    filters: CohortFilters;
-  }> = [];
+  const queryPricingCohortFn = options?.queryPricingCohortFn
+    ?? (options?.queryCohortFn ? async () => [] : queryPricingCohort);
   const stageLabel = input.stageBucket ? ` (${input.stageBucket})` : "";
 
+  const attempts: Array<{ label: string; filters: CohortFilters }> = [];
   if (input.sector && input.country) {
     attempts.push({
       label: `${input.sector} companies in ${input.country}${stageLabel}`,
@@ -337,49 +369,65 @@ export async function findComparables(
       },
     });
   }
-
   if (input.sector) {
     attempts.push({
       label: `${input.sector} companies${stageLabel}`,
       filters: { sector: input.sector, stageBucket: input.stageBucket ?? null },
     });
   }
-
   if (input.country) {
     attempts.push({
       label: `companies in ${input.country}${stageLabel}`,
       filters: { country: input.country, stageBucket: input.stageBucket ?? null },
     });
   }
-
   if (input.stageBucket) {
     attempts.push({
       label: `${input.stageBucket} companies`,
       filters: { stageBucket: input.stageBucket },
     });
   }
-
   attempts.push({
     label: input.stageBucket ? "all crowdfunding companies (all stages)" : "all crowdfunding companies",
     filters: {},
   });
 
   for (const attempt of attempts) {
-    const rows = await queryCohortFn(supabase, attempt.filters);
-    const cohortRows = input.excludeCompanyId
-      ? rows.filter((r) => r.company_id !== input.excludeCompanyId)
-      : rows;
+    const [outcomeRowsRaw, pricingRows] = await Promise.all([
+      queryCohortFn(supabase, attempt.filters),
+      queryPricingCohortFn(supabase, attempt.filters),
+    ]);
+    const outcomeRows = input.excludeCompanyId
+      ? outcomeRowsRaw.filter((r) => r.company_id !== input.excludeCompanyId)
+      : outcomeRowsRaw;
 
-    if (cohortRows.length < minCohort) continue;
+    if (outcomeRows.length < minCohort && pricingRows.length < minCohort) {
+      continue;
+    }
 
-    const cohortStats = computeStats(cohortRows);
-    const valuationContext = computeValuationContext(cohortRows, {
-      preMoneyValuation: input.preMoneyValuation,
-      revenue: input.revenue,
-    });
+    const cohortStats = computeStats(outcomeRows);
+    const pricingMultiples = pricingRows
+      .map((r) => {
+        if (!r.pre_money_valuation || !r.revenue_at_raise || r.revenue_at_raise <= 0) {
+          return null;
+        }
+        return r.pre_money_valuation / r.revenue_at_raise;
+      })
+      .filter((v): v is number => v !== null && isFinite(v) && v > 0);
+    const outcomeMultiples = outcomeRows
+      .map((r) => {
+        if (!r.pre_money_valuation || !r.revenue_at_raise || r.revenue_at_raise <= 0) {
+          return null;
+        }
+        return r.pre_money_valuation / r.revenue_at_raise;
+      })
+      .filter((v): v is number => v !== null && isFinite(v) && v > 0);
 
-    // Find nearest neighbors
-    const ranked = cohortRows
+    const valuationContext =
+      buildValuationContext(pricingMultiples, input, "pricing_cohort")
+      ?? buildValuationContext(outcomeMultiples, input, "outcome_cohort");
+
+    const ranked = outcomeRows
       .filter((r) => r.company_name)
       .map((r) => ({
         row: r,
@@ -401,13 +449,23 @@ export async function findComparables(
       campaignDate: row.campaign_date,
     }));
 
+    const outcomeSampleSize = outcomeRows.length;
+    const pricingSampleSize = pricingRows.length;
+    const sourceConfidence = inferConfidence(outcomeSampleSize, pricingSampleSize);
+
     return {
       cohortStats,
-      cohortLabel: attempt.label,
+      cohortLabel: `${attempt.label} (outcome n=${outcomeSampleSize}, pricing n=${pricingSampleSize})`,
       nearestDeals,
       valuationContext,
+      sourceSummary: {
+        outcomeSampleSize,
+        pricingSampleSize,
+      },
+      sourceConfidence,
     };
   }
 
   return null;
 }
+

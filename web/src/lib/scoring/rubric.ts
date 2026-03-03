@@ -62,6 +62,16 @@ export interface RubricInput {
   hasInstitutionalCoinvestor: boolean;
   sector: string | null;
   revenueGrowthYoy: number | null;
+  preMoneyValuation: number | null;
+  instrumentType: string | null;
+  investorCount: number | null;
+  fundingVelocityDays: number | null;
+  valuationContext: {
+    valuationPercentile: number;
+    impliedRevenueMultiple: number;
+    cohortMedianMultiple: number;
+    signal: "attractive" | "fair" | "aggressive";
+  } | null;
 }
 
 function clamp(val: number, min: number, max: number): number {
@@ -117,6 +127,30 @@ function scoreDealTerms(input: RubricInput): number {
     const ratio = input.amountRaised / input.fundingTarget;
     if (ratio >= 1.0) score += 10; // Hit target
     if (ratio >= 1.5) score += 5; // Well overfunded
+  }
+
+  if (input.valuationContext) {
+    if (input.valuationContext.signal === "attractive") score += 20;
+    else if (input.valuationContext.signal === "fair") score += 8;
+    else if (input.valuationContext.signal === "aggressive") score -= 20;
+  }
+
+  if (input.instrumentType) {
+    const instrument = input.instrumentType.toLowerCase();
+    if (instrument.includes("equity")) score += 4;
+    if (instrument.includes("safe") || instrument.includes("convertible")) score -= 4;
+    if (instrument.includes("debt")) score -= 8;
+  }
+
+  if (input.investorCount !== null) {
+    if (input.investorCount > 300) score -= 8;
+    else if (input.investorCount > 150) score -= 4;
+  }
+
+  if (input.fundingVelocityDays !== null) {
+    if (input.fundingVelocityDays <= 14) score += 8;
+    else if (input.fundingVelocityDays <= 30) score += 4;
+    else if (input.fundingVelocityDays > 90) score -= 4;
   }
 
   return clamp(score, 0, 100);
@@ -199,6 +233,12 @@ function computeDataCompleteness(input: RubricInput): number {
     input.fundingTarget,
     input.amountRaised,
     input.overfundingRatio,
+    input.preMoneyValuation,
+    input.instrumentType,
+    input.investorCount,
+    input.fundingVelocityDays,
+    input.valuationContext?.impliedRevenueMultiple ?? null,
+    input.valuationContext?.cohortMedianMultiple ?? null,
     input.sector,
     input.revenueGrowthYoy,
     input.textScore,

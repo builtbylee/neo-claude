@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { findCompany, getSupabaseClient, loadFeatures } from "@/lib/db/supabase";
+import { findCompany, loadFeatures } from "@/lib/db/supabase";
+import { resolveRouteContext } from "@/lib/auth/request-context";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
 import { checkGates } from "@/lib/scoring/gates";
 import { classify } from "@/lib/scoring/recommendation";
@@ -15,18 +16,16 @@ interface BatchItem {
 }
 
 export async function POST(request: NextRequest) {
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) {
+    return context;
+  }
   const body = (await request.json()) as { deals: BatchItem[] };
   const deals = body.deals ?? [];
   if (deals.length === 0) {
     return NextResponse.json({ error: "deals is required" }, { status: 400 });
   }
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_ANON_KEY;
-  if (!supabaseUrl || !supabaseKey) {
-    return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
-  }
-
-  const supabase = getSupabaseClient(supabaseUrl, supabaseKey);
+  const supabase = context.supabase;
   const output: Array<{
     companyName: string;
     matchedCompany: string | null;
@@ -82,6 +81,11 @@ export async function POST(request: NextRequest) {
       hasInstitutionalCoinvestor: false,
       sector: deal.sector ?? company?.sector ?? null,
       revenueGrowthYoy: null,
+      preMoneyValuation: null,
+      instrumentType: (features.instrument_type as string) ?? null,
+      investorCount: null,
+      fundingVelocityDays: null,
+      valuationContext: null,
     });
     const gates = checkGates({
       dataCompleteness: rubric.dataCompleteness,
@@ -104,4 +108,3 @@ export async function POST(request: NextRequest) {
   output.sort((a, b) => b.score - a.score);
   return NextResponse.json({ results: output });
 }
-

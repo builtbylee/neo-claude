@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { resolveRouteContext } from "@/lib/auth/request-context";
+
 interface ExportRequest {
   companyName: string;
   recommendation: { label: string; description: string };
@@ -20,6 +22,8 @@ interface ExportRequest {
 }
 
 export async function POST(request: NextRequest) {
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) return context;
   const body = (await request.json()) as ExportRequest;
   if (!body.companyName?.trim()) {
     return NextResponse.json({ error: "companyName is required" }, { status: 400 });
@@ -70,4 +74,3 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json({ markdown: `${lines.join("\n")}\n` });
 }
-

@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import AnalystWorkbench from "@/components/AnalystWorkbench";
 import ScoreForm from "@/components/ScoreForm";
 import ScoreResult from "@/components/ScoreResult";
+import { buildAuthHeaders } from "@/lib/auth/client-headers";
 import { getSupabaseBrowserClient } from "@/lib/auth/supabase-browser";
 
 type ScoreResponse = {
@@ -100,6 +101,15 @@ type ScoreResponse = {
       stalenessDays: number;
     }>;
   } | null;
+  valuationScenario: {
+    entryMultiple: number;
+    cohortMedianMultiple: number | null;
+    dilutionRetention: number;
+    bearMoic: number;
+    baseMoic: number;
+    bullMoic: number;
+    notes: string[];
+  } | null;
   comparables: {
     cohortStats: {
       sampleSize: number;
@@ -122,7 +132,14 @@ type ScoreResponse = {
       cohortMedianMultiple: number;
       signal: "attractive" | "fair" | "aggressive";
       note: string;
+      dataSource: "pricing_cohort" | "outcome_cohort";
+      sampleSize: number;
     } | null;
+    sourceSummary: {
+      outcomeSampleSize: number;
+      pricingSampleSize: number;
+    };
+    sourceConfidence: "low" | "medium" | "high";
     nearestDeals: Array<{
       name: string;
       sector: string | null;
@@ -217,6 +234,10 @@ export default function Home() {
       sizeBytes: number;
     }>;
   }) => {
+    if (authEnabled && authReady && !isAuthenticated) {
+      setError("Sign in with Google to run scoring.");
+      return;
+    }
     setIsLoading(true);
     setError(null);
     setResult(null);
@@ -224,10 +245,7 @@ export default function Home() {
     try {
       const response = await fetch("/api/score/quick", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-user-email": userEmail,
-        },
+        headers: await buildAuthHeaders(userEmail, "json"),
         body: JSON.stringify(data),
       });
 
@@ -328,7 +346,11 @@ export default function Home() {
           </div>
         </div>
 
-        <AnalystWorkbench userEmail={userEmail} />
+        <AnalystWorkbench
+          userEmail={userEmail}
+          authEnabled={authEnabled}
+          isAuthenticated={isAuthenticated}
+        />
       </main>
 
       {/* Footer */}

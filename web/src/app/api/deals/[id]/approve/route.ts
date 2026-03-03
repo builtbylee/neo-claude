@@ -1,21 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getSupabaseClient } from "@/lib/db/supabase";
-import { getActorEmail } from "@/lib/request-user";
-
-function getClient() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
-  return getSupabaseClient(url, key);
-}
+import {
+  requireApprover,
+  resolveRouteContext,
+} from "@/lib/auth/request-context";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const supabase = getClient();
-  if (!supabase) return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) return context;
+  const { supabase, actorEmail } = context;
   const { id } = await params;
   const body = (await request.json()) as {
     requestedBy?: string;
@@ -25,9 +21,14 @@ export async function POST(
   };
 
   const status = body.status ?? "pending";
-  const actorEmail = getActorEmail(request, body.requestedBy ?? null);
+
+  if (status !== "pending") {
+    const approverError = requireApprover(context);
+    if (approverError) return approverError;
+  }
+
   const requestedBy = actorEmail;
-  const approver = body.approverEmail ?? actorEmail;
+  const approver = body.approverEmail?.trim() || actorEmail;
 
   const { data, error } = await supabase
     .from("approval_requests")

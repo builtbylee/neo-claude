@@ -9,9 +9,9 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { buildProfile, scoreText, type ExtractedFacts } from "@/lib/claude/text-scorer";
 import { generateMemo, identifyMissingFields, type ICMemo, type MissingField } from "@/lib/claude/memo-generator";
+import { resolveRouteContext } from "@/lib/auth/request-context";
 import {
   findCompany,
-  getSupabaseClient,
   loadFeatures,
   loadDealTerms,
   loadFundingHistory,
@@ -28,6 +28,7 @@ import { findComparables, type ComparablesResult } from "@/lib/scoring/comparabl
 import { checkGates, type GateCheckInput } from "@/lib/scoring/gates";
 import { classify } from "@/lib/scoring/recommendation";
 import { type RubricInput, computeRubric } from "@/lib/scoring/rubric";
+import { computeValuationScenario } from "@/lib/scoring/valuation";
 import modelJson from "@/../public/model/model.json";
 
 const MODEL = modelJson as unknown as ExportedModel;
@@ -84,6 +85,15 @@ interface QuickScoreResponse {
       stalenessDays: number;
     }>;
   } | null;
+  valuationScenario: {
+    entryMultiple: number;
+    cohortMedianMultiple: number | null;
+    dilutionRetention: number;
+    bearMoic: number;
+    baseMoic: number;
+    bullMoic: number;
+    notes: string[];
+  } | null;
   regulatoryStatus: {
     companyStatus: string | null;
     companyNumber: string | null;
@@ -91,6 +101,11 @@ interface QuickScoreResponse {
 }
 
 export async function POST(request: NextRequest) {
+  const context = await resolveRouteContext(request);
+  if (context instanceof NextResponse) {
+    return context;
+  }
+  const { supabase } = context;
   const body = (await request.json()) as QuickScoreRequest;
 
   if (!body.companyName?.trim()) {
@@ -100,8 +115,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_ANON_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
   // Step 1: Entity match — look up company in database (optional)
@@ -113,8 +126,7 @@ export async function POST(request: NextRequest) {
   let provenance: QuickScoreResponse["provenance"] = null;
   let regulatoryStatus: { companyStatus: string | null; companyNumber: string | null } | null = null;
 
-  if (supabaseUrl && supabaseKey) {
-    const supabase = getSupabaseClient(supabaseUrl, supabaseKey);
+  {
     company = await findCompany(supabase, body.companyName);
 
     if (company?.id) {
@@ -317,8 +329,25 @@ export async function POST(request: NextRequest) {
     // Model inference failed — use baseline
   }
 
-  // Step 4: Rubric scoring
+  // Step 4: Comparables — used for valuation context and final output
   const effectiveRevenue = (features.revenue_at_raise as number) ?? body.revenue ?? null;
+  let comparables: ComparablesResult | null = null;
+  try {
+    comparables = await findComparables(supabase, {
+      sector: body.sector ?? company?.sector ?? null,
+      country: (features.country as string) ?? company?.country ?? null,
+      stageBucket,
+      fundingTarget: (features.funding_target as number) ?? body.fundingTarget ?? null,
+      preMoneyValuation: dealTerms?.pre_money_valuation ?? null,
+      companyAge: (features.company_age_months as number) ?? null,
+      revenue: effectiveRevenue,
+      excludeCompanyId: company?.id ?? null,
+    });
+  } catch {
+    // Comparables query failed — continue without it
+  }
+
+  // Step 5: Rubric scoring
   const rubricInput: RubricInput = {
     mlScore,
     textScore: textScores?.text_quality_score ?? null,
@@ -339,16 +368,35 @@ export async function POST(request: NextRequest) {
     totalDebt: (features.total_debt as number) ?? null,
     cashPosition: (features.cash_position as number) ?? null,
     fundingTarget: (features.funding_target as number) ?? body.fundingTarget ?? null,
-    amountRaised: (features.amount_raised as number) ?? null,
-    overfundingRatio: (features.overfunding_ratio as number) ?? null,
-    hasInstitutionalCoinvestor: false,
-    sector: body.sector ?? null,
+    amountRaised: (features.amount_raised as number) ?? dealTerms?.amount_raised ?? null,
+    overfundingRatio: (features.overfunding_ratio as number) ?? dealTerms?.overfunding_ratio ?? null,
+    hasInstitutionalCoinvestor: Boolean(dealTerms?.qualified_institutional),
+    sector: body.sector ?? company?.sector ?? null,
     revenueGrowthYoy: extractedFacts?.revenueGrowthYoy ?? null,
+    preMoneyValuation: dealTerms?.pre_money_valuation ?? null,
+    instrumentType: dealTerms?.instrument_type ?? (features.instrument_type as string) ?? null,
+    investorCount: dealTerms?.investor_count ?? null,
+    fundingVelocityDays: dealTerms?.funding_velocity_days ?? null,
+    valuationContext: comparables?.valuationContext
+      ? {
+          valuationPercentile: comparables.valuationContext.valuationPercentile,
+          impliedRevenueMultiple: comparables.valuationContext.impliedRevenueMultiple,
+          cohortMedianMultiple: comparables.valuationContext.cohortMedianMultiple,
+          signal: comparables.valuationContext.signal,
+        }
+      : null,
   };
 
   const rubricResult = computeRubric(rubricInput);
+  const valuationScenario = computeValuationScenario({
+    stageBucket,
+    preMoneyValuation: dealTerms?.pre_money_valuation ?? null,
+    revenue: effectiveRevenue,
+    valuationSignal: comparables?.valuationContext?.signal ?? null,
+    cohortMedianMultiple: comparables?.valuationContext?.cohortMedianMultiple ?? null,
+  });
 
-  // Step 5: Abstention gates
+  // Step 6: Abstention gates
   const gateInput: GateCheckInput = {
     dataCompleteness: rubricResult.dataCompleteness,
     modelScore: rubricResult.overallScore,
@@ -423,26 +471,6 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Step 9: Comparables — find similar deals and compute cohort stats
-  let comparables: ComparablesResult | null = null;
-  if (supabaseUrl && supabaseKey) {
-    try {
-      const supabase = getSupabaseClient(supabaseUrl, supabaseKey);
-      comparables = await findComparables(supabase, {
-        sector: body.sector ?? company?.sector ?? null,
-        country: (features.country as string) ?? company?.country ?? null,
-        stageBucket,
-        fundingTarget: (features.funding_target as number) ?? body.fundingTarget ?? null,
-        preMoneyValuation: dealTerms?.pre_money_valuation ?? null,
-        companyAge: (features.company_age_months as number) ?? null,
-        revenue: effectiveRevenue,
-        excludeCompanyId: company?.id ?? null,
-      });
-    } catch {
-      // Comparables query failed — continue without it
-    }
-  }
-
   const response: QuickScoreResponse = {
     score: rubricResult.overallScore,
     confidenceRange: rubricResult.confidenceRange,
@@ -488,6 +516,7 @@ export async function POST(request: NextRequest) {
       warnings: documentIngestion.warnings,
     },
     provenance,
+    valuationScenario,
     regulatoryStatus,
   };
 

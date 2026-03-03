@@ -9,8 +9,18 @@ import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnySupabaseClient = SupabaseClient<any, any, any>;
 
-export function getSupabaseClient(url: string, key: string): AnySupabaseClient {
-  return createClient(url, key);
+export function getSupabaseClient(
+  url: string,
+  key: string,
+  accessToken?: string,
+): AnySupabaseClient {
+  return createClient(url, key, {
+    global: accessToken
+      ? {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }
+      : undefined,
+  });
 }
 
 export interface CompanyRow {
