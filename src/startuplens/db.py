@@ -1,6 +1,9 @@
 """PostgreSQL database connection via psycopg3."""
 
 import psycopg
+from psycopg import sql
+from psycopg.errors import ObjectNotInPrerequisiteState
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
 from startuplens.config import Settings
@@ -36,6 +39,27 @@ def refresh_matview(conn: psycopg.Connection, name: str = "training_features_wid
 
     Uses CONCURRENTLY when possible (requires a unique index on the matview).
     """
-    with conn.cursor() as cur:
-        cur.execute(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {name}")  # noqa: S608
-    conn.commit()
+    previous_autocommit = conn.autocommit
+    identifier = sql.Identifier(name)
+
+    try:
+        # REFRESH ... CONCURRENTLY must run outside an explicit transaction.
+        if not conn.autocommit:
+            if conn.info.transaction_status != TransactionStatus.IDLE:
+                conn.commit()
+            conn.autocommit = True
+
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("REFRESH MATERIALIZED VIEW CONCURRENTLY {}").format(identifier),
+            )
+    except ObjectNotInPrerequisiteState:
+        # Fallback for matviews that don't have a qualifying unique index.
+        if conn.autocommit != previous_autocommit:
+            conn.autocommit = previous_autocommit
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("REFRESH MATERIALIZED VIEW {}").format(identifier))
+        conn.commit()
+    finally:
+        if conn.autocommit != previous_autocommit:
+            conn.autocommit = previous_autocommit
