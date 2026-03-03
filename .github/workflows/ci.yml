@@ -38,7 +38,10 @@ jobs:
         run: npm --prefix web ci
 
       - name: Test web
-        run: npm --prefix web test
+        run: |
+          shopt -s globstar
+          cd web
+          npx tsx --test src/**/*.test.ts
 
       - name: Build web
         run: npm --prefix web run build
