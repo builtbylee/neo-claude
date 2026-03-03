@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import structlog
@@ -27,6 +28,14 @@ def _quarter_start(d: date) -> date:
 def _quarter_label(d: date) -> str:
     quarter = ((d.month - 1) // 3) + 1
     return f"{d.year}-Q{quarter}"
+
+
+def _json_default(value):
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
 
 
 @app.command()
@@ -231,7 +240,7 @@ def main(
         json_path = output / f"quarterly_evidence_{quarter_label}.json"
         md_path = output / f"quarterly_evidence_{quarter_label}.md"
 
-        json_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+        json_path.write_text(json.dumps(summary, indent=2, default=_json_default), encoding="utf-8")
 
         md_lines = [
             f"# StartupLens Quarterly Evidence Report — {quarter_label}",
@@ -315,7 +324,7 @@ def main(
             (
                 quarter,
                 json.dumps(run_ids),
-                json.dumps(summary),
+                json.dumps(summary, default=_json_default),
                 release_ready,
                 str(json_path),
                 "Quarterly evidence generated from rolling segment backtests and valuation cohorts",
