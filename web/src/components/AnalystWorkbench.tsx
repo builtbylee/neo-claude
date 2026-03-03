@@ -48,6 +48,14 @@ type ActivityEvent = {
   created_at: string;
 };
 
+type DealReminder = {
+  id: string;
+  reminder_type: string;
+  due_at: string;
+  status: string;
+  priority: string;
+};
+
 const STATUS_OPTIONS = ["new", "screening", "diligence", "ic", "pass", "invest"];
 
 interface AnalystWorkbenchProps {
@@ -105,9 +113,12 @@ export default function AnalystWorkbench({
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [comments, setComments] = useState<DealComment[]>([]);
   const [events, setEvents] = useState<ActivityEvent[]>([]);
+  const [reminders, setReminders] = useState<DealReminder[]>([]);
   const [taskTitle, setTaskTitle] = useState("");
   const [commentBody, setCommentBody] = useState("");
   const [modelHealth, setModelHealth] = useState<ModelHealth | null>(null);
+  const [pendingReminderCount, setPendingReminderCount] = useState<number>(0);
+  const [exportingAudit, setExportingAudit] = useState(false);
 
   const stats = useMemo(() => {
     const byStatus = new Map<string, number>();
@@ -151,25 +162,50 @@ export default function AnalystWorkbench({
       setTasks([]);
       setComments([]);
       setEvents([]);
+      setReminders([]);
       return;
     }
     const headers = await buildAuthHeaders(userEmail);
-    const [tasksResp, commentsResp, eventsResp] = await Promise.all([
+    const [tasksResp, commentsResp, eventsResp, remindersResp] = await Promise.all([
       fetch(`/api/deals/${dealId}/tasks`, { headers }),
       fetch(`/api/deals/${dealId}/comments`, { headers }),
       fetch(`/api/deals/${dealId}/activity`, { headers }),
+      fetch(`/api/deals/${dealId}/reminders`, { headers }),
     ]);
     const tasksData = (await tasksResp.json()) as { tasks?: TaskItem[] };
     const commentsData = (await commentsResp.json()) as { comments?: DealComment[] };
     const eventsData = (await eventsResp.json()) as { events?: ActivityEvent[] };
+    const remindersData = (await remindersResp.json()) as {
+      reminders?: DealReminder[];
+    };
     setTasks(tasksData.tasks ?? []);
     setComments(commentsData.comments ?? []);
     setEvents(eventsData.events ?? []);
+    setReminders(remindersData.reminders ?? []);
   }
 
   useEffect(() => {
     void refreshDeals();
   }, [authEnabled, isAuthenticated, userEmail]);
+
+  useEffect(() => {
+    async function refreshReminderCount() {
+      if (authEnabled && !isAuthenticated) {
+        setPendingReminderCount(0);
+        return;
+      }
+      const response = await fetch("/api/reminders?status=pending&limit=500", {
+        headers: await buildAuthHeaders(userEmail),
+      });
+      if (!response.ok) {
+        setPendingReminderCount(0);
+        return;
+      }
+      const data = (await response.json()) as { reminders?: unknown[] };
+      setPendingReminderCount((data.reminders ?? []).length);
+    }
+    void refreshReminderCount();
+  }, [authEnabled, isAuthenticated, userEmail, selectedDealId]);
 
   useEffect(() => {
     if (selectedDealId) {
@@ -284,13 +320,39 @@ export default function AnalystWorkbench({
     await refreshSelected(selectedDealId);
   }
 
+  async function exportAudit(type: "activity_events" | "recommendations" | "pipeline_snapshot") {
+    setExportingAudit(true);
+    try {
+      const response = await fetch(`/api/export/audit?type=${type}&limit=1000`, {
+        headers: await buildAuthHeaders(userEmail),
+      });
+      if (!response.ok) return;
+      const data = (await response.json()) as {
+        exportType: string;
+        generatedAt: string;
+        records: unknown[];
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `startuplens-${data.exportType}-${data.generatedAt.slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExportingAudit(false);
+    }
+  }
+
   return (
     <section className="mt-10 space-y-6">
       <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 p-5">
         <h3 className="mb-3 text-sm font-semibold text-neutral-200">
           Analyst Workbench
         </h3>
-        <div className="grid grid-cols-2 gap-3 text-xs text-neutral-400 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 text-xs text-neutral-400 sm:grid-cols-5">
           <div>
             Total deals: <span className="text-neutral-200">{stats.total}</span>
           </div>
@@ -303,6 +365,9 @@ export default function AnalystWorkbench({
           </div>
           <div>
             Invested: <span className="text-neutral-200">{stats.invest}</span>
+          </div>
+          <div>
+            Due reminders: <span className="text-neutral-200">{pendingReminderCount}</span>
           </div>
         </div>
       </div>
@@ -388,6 +453,24 @@ export default function AnalystWorkbench({
               Valuation audits with realized outcomes: {modelHealth.valuationAudit.realizedCoverage}
               {" · "}
               MAE: {modelHealth.valuationAudit.meanAbsoluteError ?? "n/a"}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={exportingAudit}
+                onClick={() => void exportAudit("activity_events")}
+                className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-200 disabled:opacity-60"
+              >
+                Export Activity Log
+              </button>
+              <button
+                type="button"
+                disabled={exportingAudit}
+                onClick={() => void exportAudit("recommendations")}
+                className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-200 disabled:opacity-60"
+              >
+                Export Recommendations
+              </button>
             </div>
           </div>
         </div>
@@ -511,7 +594,7 @@ export default function AnalystWorkbench({
             </button>
           </div>
 
-          <div className="grid gap-5 lg:grid-cols-3">
+          <div className="grid gap-5 lg:grid-cols-4">
             <div>
               <h5 className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral-400">
                 Tasks
@@ -573,6 +656,29 @@ export default function AnalystWorkbench({
                 >
                   Save
                 </button>
+              </div>
+            </div>
+
+            <div>
+              <h5 className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral-400">
+                Reminders
+              </h5>
+              <div className="max-h-56 space-y-2 overflow-auto">
+                {reminders.length === 0 && (
+                  <div className="text-xs text-neutral-500">
+                    No reminders set.
+                  </div>
+                )}
+                {reminders.map((reminder) => (
+                  <div key={reminder.id} className="rounded border border-neutral-800 p-2">
+                    <div className="text-sm text-neutral-200">
+                      {reminder.reminder_type.replace(/_/g, " ")}
+                    </div>
+                    <div className="text-xs text-neutral-500">
+                      due {new Date(reminder.due_at).toLocaleDateString()} · {reminder.priority} · {reminder.status}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
 

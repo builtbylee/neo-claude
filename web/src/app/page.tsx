@@ -192,6 +192,11 @@ export default function Home() {
   const [authReady, setAuthReady] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [usageSummary, setUsageSummary] = useState<{
+    plan: string;
+    quickUsed: number;
+    quickLimit: number;
+  } | null>(null);
 
   useEffect(() => {
     const enableGoogleAuth =
@@ -291,6 +296,37 @@ export default function Home() {
     }
   };
 
+  useEffect(() => {
+    async function loadUsageSummary() {
+      if (authEnabled && authReady && !isAuthenticated) {
+        setUsageSummary(null);
+        return;
+      }
+      try {
+        const resp = await fetch("/api/account/usage", {
+          headers: await buildAuthHeaders(userEmail),
+        });
+        if (!resp.ok) {
+          setUsageSummary(null);
+          return;
+        }
+        const data = (await resp.json()) as {
+          subscription?: { displayName?: string };
+          usageThisMonth?: { quickScore?: number };
+          limits?: { quickScore?: number };
+        };
+        setUsageSummary({
+          plan: data.subscription?.displayName ?? "Free",
+          quickUsed: data.usageThisMonth?.quickScore ?? 0,
+          quickLimit: data.limits?.quickScore ?? 300,
+        });
+      } catch {
+        setUsageSummary(null);
+      }
+    }
+    void loadUsageSummary();
+  }, [authEnabled, authReady, isAuthenticated, userEmail, result]);
+
   return (
     <div className="min-h-screen bg-neutral-950">
       {/* Header */}
@@ -310,6 +346,11 @@ export default function Home() {
         </div>
         <div className="max-w-4xl mx-auto px-6 pb-4 flex items-center justify-between text-xs text-neutral-500">
           <span>User: {userEmail}</span>
+          {usageSummary && (
+            <span>
+              Plan: {usageSummary.plan} · Quick used {usageSummary.quickUsed}/{usageSummary.quickLimit}
+            </span>
+          )}
           {authEnabled && authReady ? (
             <button
               type="button"

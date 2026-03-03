@@ -226,6 +226,15 @@ export interface SanctionsScreeningInsert {
   details: Record<string, unknown>;
 }
 
+export interface DealReminderInsert {
+  deal_id: string;
+  reminder_type: "next_action" | "follow_on" | "diligence_review";
+  due_at: string;
+  priority: "low" | "medium" | "high" | "critical";
+  payload: Record<string, unknown>;
+  created_by: string;
+}
+
 /**
  * Load latest provenance entries for selected features.
  */
@@ -283,4 +292,11 @@ export async function insertSanctionsScreening(
   payload: SanctionsScreeningInsert,
 ): Promise<void> {
   await supabase.from("sanctions_screenings").insert(payload);
+}
+
+export async function insertDealReminder(
+  supabase: AnySupabaseClient,
+  payload: DealReminderInsert,
+): Promise<void> {
+  await supabase.from("deal_reminders").insert(payload);
 }

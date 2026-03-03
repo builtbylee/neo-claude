@@ -346,6 +346,13 @@ export default function ScoreResult({ result }: ScoreResultProps) {
             {" · "}
             {result.valuationConfidenceReason}
           </div>
+          {result.comparables?.sourceSummary && (
+            <div className="text-xs text-neutral-400 mb-3">
+              Pricing comps: {result.comparables.sourceSummary.pricingSampleSize} rows
+              {" · "}revenue-linked {result.comparables.sourceSummary.pricingRevenueSampleSize}
+              {" · "}proxy {result.comparables.sourceSummary.pricingProxySampleSize}
+            </div>
+          )}
           {result.sanctions.checked && (
             <div className="text-xs text-neutral-400">
               Sanctions:{" "}

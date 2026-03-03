@@ -83,6 +83,22 @@ function buildMemoPrompt(input: MemoInput): string {
 
   parts.push(`\nData Source: ${input.dataSource}`);
   parts.push(`Data Completeness: ${input.dataCompleteness}%`);
+  if (input.valuationConfidence) {
+    parts.push(`Valuation Confidence: ${input.valuationConfidence}`);
+  }
+  if (input.valuationConfidenceReason) {
+    parts.push(`Valuation Confidence Reason: ${input.valuationConfidenceReason}`);
+  }
+  if (input.segmentEvidence) {
+    parts.push(
+      `Segment Evidence: ${input.segmentEvidence.segmentKey}, n=${input.segmentEvidence.sampleSize}, AUC=${input.segmentEvidence.survivalAuc ?? "n/a"}, ECE=${input.segmentEvidence.calibrationEce ?? "n/a"}, release_gate=${input.segmentEvidence.releaseGateOpen}, evidence_ok=${input.segmentEvidence.evidenceOk}`,
+    );
+  }
+  if (input.provenanceSummary) {
+    parts.push(
+      `Data Provenance: newest_as_of=${input.provenanceSummary.newestAsOfDate ?? "unknown"}, stale=${input.provenanceSummary.stale}, tracked_fields=${input.provenanceSummary.fieldCount}`,
+    );
+  }
 
   const missingFieldsList = identifyMissingFields(input);
   if (missingFieldsList.length > 0) {
@@ -127,6 +143,21 @@ export interface MemoInput {
   dataSource: string;
   dataCompleteness: number;
   generatedProfile: string | null;
+  valuationConfidence?: "low" | "medium" | "high";
+  valuationConfidenceReason?: string;
+  segmentEvidence?: {
+    segmentKey: string;
+    sampleSize: number;
+    survivalAuc: number | null;
+    calibrationEce: number | null;
+    releaseGateOpen: boolean;
+    evidenceOk: boolean;
+  } | null;
+  provenanceSummary?: {
+    newestAsOfDate: string | null;
+    stale: boolean;
+    fieldCount: number;
+  } | null;
 }
 
 /**

@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { buildProfile, scoreText, type ExtractedFacts } from "@/lib/claude/text-scorer";
 import { generateMemo, identifyMissingFields, type ICMemo, type MissingField } from "@/lib/claude/memo-generator";
 import { resolveRouteContext } from "@/lib/auth/request-context";
+import { canConsumeUsage, recordUsageEvent } from "@/lib/auth/usage-limits";
 import { screenNameAgainstSanctions } from "@/lib/compliance/sanctions";
 import {
   findCompany,
@@ -124,6 +125,11 @@ interface QuickScoreResponse {
     companyStatus: string | null;
     companyNumber: string | null;
   } | null;
+  usage: {
+    planLimit: number;
+    usedThisMonth: number;
+    remaining: number;
+  } | null;
 }
 
 export async function POST(request: NextRequest) {
@@ -138,6 +144,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "companyName is required" },
       { status: 400 },
+    );
+  }
+
+  const usageGate = await canConsumeUsage(supabase, context.actorEmail, "quick_score", 1);
+  if (!usageGate.allowed) {
+    return NextResponse.json(
+      {
+        error: usageGate.reason,
+        usage: {
+          planLimit: usageGate.limit,
+          usedThisMonth: usageGate.used,
+          remaining: Math.max(0, usageGate.limit - usageGate.used),
+        },
+      },
+      { status: 429 },
     );
   }
 
@@ -557,6 +578,16 @@ export async function POST(request: NextRequest) {
     dataSource,
     dataCompleteness: Math.round(rubricResult.dataCompleteness * 100),
     generatedProfile,
+    valuationConfidence,
+    valuationConfidenceReason,
+    segmentEvidence,
+    provenanceSummary: provenance
+      ? {
+          newestAsOfDate: provenance.newestAsOfDate,
+          stale: provenance.stale,
+          fieldCount: provenance.fields.length,
+        }
+      : null,
   };
 
   const missingFields = identifyMissingFields(memoInput);
@@ -642,7 +673,19 @@ export async function POST(request: NextRequest) {
     segmentEvidence,
     sanctions,
     regulatoryStatus,
+    usage: {
+      planLimit: usageGate.limit,
+      usedThisMonth: usageGate.used + 1,
+      remaining: Math.max(0, usageGate.limit - (usageGate.used + 1)),
+    },
   };
+
+  void recordUsageEvent(supabase, context.actorEmail, "quick_score", 1, {
+    companyName: body.companyName,
+    matchedCompany: company?.name ?? null,
+    recommendationClass: recommendation.class,
+    score: rubricResult.overallScore,
+  });
 
   return NextResponse.json(response);
 }

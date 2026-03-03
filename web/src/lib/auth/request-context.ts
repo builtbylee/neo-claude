@@ -11,6 +11,14 @@ export interface RouteContext {
   canApprove: boolean;
 }
 
+function defaultRole(): Role {
+  const candidate = (process.env.DEFAULT_USER_ROLE ?? "admin").toLowerCase();
+  if (candidate === "admin" || candidate === "analyst" || candidate === "viewer") {
+    return candidate;
+  }
+  return "admin";
+}
+
 function defaultActorEmail(): string {
   return (
     process.env.DEFAULT_USER_EMAIL ??
@@ -20,10 +28,9 @@ function defaultActorEmail(): string {
 }
 
 function authRequired(): boolean {
-  return (
-    process.env.NEXT_PUBLIC_ENABLE_GOOGLE_AUTH === "true" ||
-    process.env.ENFORCE_AUTH === "true"
-  );
+  if (process.env.ENFORCE_AUTH === "true") return true;
+  if (process.env.ENFORCE_AUTH === "false") return false;
+  return process.env.NEXT_PUBLIC_ENABLE_GOOGLE_AUTH === "true";
 }
 
 function unauthorized(message: string): NextResponse {
@@ -69,6 +76,20 @@ export async function resolveRouteContext(
     return unauthorized("Authentication required");
   }
 
+  if (authenticated && !actorEmail) {
+    return unauthorized("Authenticated user email not available");
+  }
+
+  if (!authenticated && !authRequired()) {
+    const role = defaultRole();
+    return {
+      supabase,
+      actorEmail,
+      role,
+      canApprove: role === "admin",
+    };
+  }
+
   const { data: roleRow } = await supabase
     .from("user_roles")
     .select("role, can_approve, active")
@@ -107,4 +128,3 @@ export function requireApprover(context: RouteContext): NextResponse | null {
   }
   return null;
 }
-

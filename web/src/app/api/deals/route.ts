@@ -4,6 +4,7 @@ import {
   requireAtLeastAnalyst,
   resolveRouteContext,
 } from "@/lib/auth/request-context";
+import { insertDealReminder } from "@/lib/db/supabase";
 
 export async function GET(request: NextRequest) {
   const context = await resolveRouteContext(request);
@@ -73,6 +74,44 @@ export async function POST(request: NextRequest) {
 
   if (error) {
     return NextResponse.json({ error: "Failed to create deal" }, { status: 500 });
+  }
+
+  try {
+    const now = new Date();
+    const defaultDue = new Date(now);
+    defaultDue.setDate(defaultDue.getDate() + 7);
+    const dueDate = body.nextActionDate
+      ? new Date(body.nextActionDate)
+      : defaultDue;
+    if (Number.isFinite(dueDate.getTime())) {
+      await insertDealReminder(supabase, {
+        deal_id: data.id,
+        reminder_type: "next_action",
+        due_at: dueDate.toISOString(),
+        priority: (body.priority as "low" | "medium" | "high" | "critical") ?? "medium",
+        payload: {
+          source: "deal_create",
+          recommendationClass: body.recommendationClass ?? null,
+        },
+        created_by: actorEmail,
+      });
+    }
+    if ((body.recommendationClass ?? "").toLowerCase() === "deep_diligence") {
+      const diligenceDue = new Date(now);
+      diligenceDue.setDate(diligenceDue.getDate() + 3);
+      await insertDealReminder(supabase, {
+        deal_id: data.id,
+        reminder_type: "diligence_review",
+        due_at: diligenceDue.toISOString(),
+        priority: "high",
+        payload: {
+          source: "auto_deep_diligence",
+        },
+        created_by: actorEmail,
+      });
+    }
+  } catch {
+    // Reminder failures should not block deal creation.
   }
 
   await supabase.from("activity_events").insert({

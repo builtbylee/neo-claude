@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { findCompany, loadFeatures } from "@/lib/db/supabase";
 import { resolveRouteContext } from "@/lib/auth/request-context";
+import { canConsumeUsage, recordUsageEvent } from "@/lib/auth/usage-limits";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
 import { checkGates } from "@/lib/scoring/gates";
 import { classify } from "@/lib/scoring/recommendation";
@@ -24,6 +25,21 @@ export async function POST(request: NextRequest) {
   const deals = body.deals ?? [];
   if (deals.length === 0) {
     return NextResponse.json({ error: "deals is required" }, { status: 400 });
+  }
+  const units = Math.min(deals.length, 50);
+  const usageGate = await canConsumeUsage(context.supabase, context.actorEmail, "batch_score", units);
+  if (!usageGate.allowed) {
+    return NextResponse.json(
+      {
+        error: usageGate.reason,
+        usage: {
+          planLimit: usageGate.limit,
+          usedThisMonth: usageGate.used,
+          remaining: Math.max(0, usageGate.limit - usageGate.used),
+        },
+      },
+      { status: 429 },
+    );
   }
   const supabase = context.supabase;
   const output: Array<{
@@ -107,5 +123,16 @@ export async function POST(request: NextRequest) {
   }
 
   output.sort((a, b) => b.score - a.score);
-  return NextResponse.json({ results: output });
+  void recordUsageEvent(supabase, context.actorEmail, "batch_score", units, {
+    submittedDeals: deals.length,
+    processedDeals: units,
+  });
+  return NextResponse.json({
+    results: output,
+    usage: {
+      planLimit: usageGate.limit,
+      usedThisMonth: usageGate.used + units,
+      remaining: Math.max(0, usageGate.limit - (usageGate.used + units)),
+    },
+  });
 }
