@@ -44,6 +44,10 @@ interface ScoreResultProps {
       label: string;
       impact: string;
     }>;
+    regulatoryStatus: {
+      companyStatus: string | null;
+      companyNumber: string | null;
+    } | null;
     dealTerms: {
       instrument_type: string | null;
       round_type: string | null;
@@ -377,6 +381,41 @@ export default function ScoreResult({ result }: ScoreResultProps) {
                 <span className="text-neutral-500">Institutional: </span>
                 <span className="text-neutral-200 font-medium">
                   {result.dealTerms.qualified_institutional ? "Yes" : "No"}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Regulatory Status (UK Companies House) */}
+      {result.regulatoryStatus && (
+        <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+          <h3 className="text-sm font-semibold text-neutral-300 mb-3">
+            UK Regulatory Status
+          </h3>
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            {result.regulatoryStatus.companyStatus && (
+              <div>
+                <span className="text-neutral-500">Status: </span>
+                <span
+                  className={`font-medium capitalize ${
+                    result.regulatoryStatus.companyStatus === "active"
+                      ? "text-green-400"
+                      : result.regulatoryStatus.companyStatus === "dissolved"
+                        ? "text-red-400"
+                        : "text-yellow-400"
+                  }`}
+                >
+                  {result.regulatoryStatus.companyStatus}
+                </span>
+              </div>
+            )}
+            {result.regulatoryStatus.companyNumber && (
+              <div>
+                <span className="text-neutral-500">Company No: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.regulatoryStatus.companyNumber}
                 </span>
               </div>
             )}

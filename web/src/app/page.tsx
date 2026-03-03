@@ -48,6 +48,10 @@ type ScoreResponse = {
     label: string;
     impact: string;
   }>;
+  regulatoryStatus: {
+    companyStatus: string | null;
+    companyNumber: string | null;
+  } | null;
   dealTerms: {
     instrument_type: string | null;
     round_type: string | null;

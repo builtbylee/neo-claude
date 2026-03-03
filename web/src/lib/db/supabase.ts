@@ -104,6 +104,31 @@ export async function loadDealTerms(
   return null;
 }
 
+export interface RegulatoryRow {
+  current_status: string | null;
+  source_id: string | null;
+}
+
+/**
+ * Load Companies House regulatory data for a company.
+ * Looks up by entity_id linkage to find the CH record.
+ */
+export async function loadRegulatoryData(
+  supabase: AnySupabaseClient,
+  entityId: string,
+): Promise<RegulatoryRow | null> {
+  // Find the Companies House record linked to this entity
+  const { data } = await supabase
+    .from("companies")
+    .select("current_status, source_id")
+    .eq("source", "companies_house")
+    .eq("entity_id", entityId)
+    .limit(1);
+
+  if (data && data.length > 0) return data[0] as RegulatoryRow;
+  return null;
+}
+
 /**
  * Load features for an entity from the training_features_wide matview.
  */

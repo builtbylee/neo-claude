@@ -81,8 +81,14 @@ def fetch_officers(client: httpx.Client, company_number: str) -> list[dict]:
         return []
 
 
-def normalize_company_profile(raw: dict) -> dict:
-    """Normalize a Companies House profile into our schema fields."""
+def normalize_company_profile(
+    raw: dict,
+    officers: list[dict] | None = None,
+) -> dict:
+    """Normalize a Companies House profile into our schema fields.
+
+    Optionally enriches with officer data to count disqualifications.
+    """
     incorporation_date = raw.get("date_of_creation")
     if incorporation_date:
         incorporation_date = date.fromisoformat(incorporation_date)
@@ -95,6 +101,32 @@ def normalize_company_profile(raw: dict) -> dict:
 
     accounts_overdue = accounts.get("overdue", False)
 
+    # Compute charges count from API response
+    charges_count = 0
+    if raw.get("has_charges"):
+        charges_count = raw.get("charges", {}).get("total_count", 1)
+
+    # Count resigned vs active directors, and disqualifications
+    director_disqualifications = 0
+    active_director_count = 0
+    if officers:
+        for officer in officers:
+            role = officer.get("officer_role", "")
+            resigned = officer.get("resigned_on")
+            if "director" in role.lower() and not resigned:
+                active_director_count += 1
+            # Officers with disqualified_until are disqualified
+            if officer.get("disqualified_until"):
+                director_disqualifications += 1
+
+    # Compute company age in months from incorporation date
+    company_age_months = None
+    if incorporation_date:
+        today = date.today()
+        company_age_months = (today.year - incorporation_date.year) * 12 + (
+            today.month - incorporation_date.month
+        )
+
     return {
         "company_number": raw.get("company_number", ""),
         "company_name": raw.get("company_name", ""),
@@ -105,6 +137,10 @@ def normalize_company_profile(raw: dict) -> dict:
         "last_accounts_date": last_accounts_date,
         "accounts_overdue": accounts_overdue,
         "has_charges": raw.get("has_charges", False),
+        "charges_count": charges_count,
+        "director_disqualifications": director_disqualifications,
+        "active_director_count": active_director_count,
+        "company_age_months": company_age_months,
         "country": "UK",
     }
 
@@ -198,7 +234,11 @@ def run_companies_house_pipeline(
             stats["errors"] += 1
             continue
 
-        normalized = normalize_company_profile(profile)
+        # Fetch officers to compute director count and disqualifications
+        time.sleep(REQUEST_INTERVAL)
+        officers = fetch_officers(client, company_number)
+
+        normalized = normalize_company_profile(profile, officers)
         batch.append(normalized)
         stats["fetched"] += 1
 

@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { buildProfile, scoreText, type ExtractedFacts } from "@/lib/claude/text-scorer";
 import { generateMemo, identifyMissingFields, type ICMemo, type MissingField } from "@/lib/claude/memo-generator";
-import { findCompany, getSupabaseClient, loadFeatures, loadDealTerms, type DealTermsRow } from "@/lib/db/supabase";
+import { findCompany, getSupabaseClient, loadFeatures, loadDealTerms, loadRegulatoryData, type DealTermsRow } from "@/lib/db/supabase";
 import { scrapeWebsite } from "@/lib/enrichment/website-scraper";
 import { scoreFromKnowledge } from "@/lib/enrichment/knowledge-enrichment";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
@@ -55,6 +55,10 @@ interface QuickScoreResponse {
   missingFields: MissingField[];
   comparables: ComparablesResult | null;
   dealTerms: DealTermsRow | null;
+  regulatoryStatus: {
+    companyStatus: string | null;
+    companyNumber: string | null;
+  } | null;
 }
 
 export async function POST(request: NextRequest) {
@@ -75,6 +79,7 @@ export async function POST(request: NextRequest) {
   let company = null;
   let features: CompanyFeatures = {};
   let dealTerms: DealTermsRow | null = null;
+  let regulatoryStatus: { companyStatus: string | null; companyNumber: string | null } | null = null;
 
   if (supabaseUrl && supabaseKey) {
     const supabase = getSupabaseClient(supabaseUrl, supabaseKey);
@@ -89,6 +94,19 @@ export async function POST(request: NextRequest) {
     }
 
     if (company?.entity_id) {
+      // Load regulatory data from Companies House records
+      try {
+        const regData = await loadRegulatoryData(supabase, company.entity_id);
+        if (regData) {
+          regulatoryStatus = {
+            companyStatus: regData.current_status,
+            companyNumber: regData.source_id,
+          };
+        }
+      } catch {
+        // Regulatory query failed — continue without
+      }
+
       const featureRow = await loadFeatures(supabase, company.entity_id);
       if (featureRow) {
         features = {
@@ -362,6 +380,7 @@ export async function POST(request: NextRequest) {
     missingFields,
     comparables,
     dealTerms,
+    regulatoryStatus,
   };
 
   return NextResponse.json(response);
