@@ -134,13 +134,17 @@ export interface MemoInput {
 export function identifyMissingFields(input: MemoInput): MissingField[] {
   const missing: MissingField[] = [];
 
-  const hasText = input.textScores !== null;
-  const hasRevenue = input.extractedFacts?.revenue !== null ||
-    (input.features?.revenue_at_raise !== null && input.features?.revenue_at_raise !== undefined);
-  const hasFundingTarget = input.extractedFacts?.fundingTarget !== null ||
-    (input.features?.funding_target !== null && input.features?.funding_target !== undefined);
-  const hasFinancials = input.features?.total_assets !== null && input.features?.total_assets !== undefined;
-  const hasGrowth = input.extractedFacts?.revenueGrowthYoy !== null;
+  const isPresent = (value: unknown): boolean => value !== null && value !== undefined;
+
+  const hasText = input.textScores !== null && Object.keys(input.textScores).length > 0;
+  const hasRevenue =
+    isPresent(input.extractedFacts?.revenue) ||
+    isPresent(input.features?.revenue_at_raise);
+  const hasFundingTarget =
+    isPresent(input.extractedFacts?.fundingTarget) ||
+    isPresent(input.features?.funding_target);
+  const hasFinancials = isPresent(input.features?.total_assets);
+  const hasGrowth = isPresent(input.extractedFacts?.revenueGrowthYoy);
 
   if (!hasText) {
     missing.push({
