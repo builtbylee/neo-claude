@@ -33,6 +33,7 @@ interface ScoreResultProps {
       thesis: string;
       evidence: string[];
       risks: string[];
+      diligenceChecklist: string[];
       missingData: Array<{
         field: string;
         label: string;
@@ -320,6 +321,21 @@ export default function ScoreResult({ result }: ScoreResultProps) {
               {result.memo.verdict}
             </p>
           </div>
+
+          {result.memo.diligenceChecklist.length > 0 && (
+            <div className="border-t border-neutral-700/50 pt-3 mt-3">
+              <h4 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-2">
+                Diligence Checklist
+              </h4>
+              <ul className="space-y-1.5">
+                {result.memo.diligenceChecklist.map((item, i) => (
+                  <li key={`${item}-${i}`} className="text-sm text-neutral-300">
+                    - [ ] {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 

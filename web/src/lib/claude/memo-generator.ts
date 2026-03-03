@@ -12,6 +12,7 @@ export interface ICMemo {
   evidence: string[];
   risks: string[];
   missingData: MissingField[];
+  diligenceChecklist: string[];
   verdict: string;
 }
 
@@ -189,6 +190,33 @@ export function identifyMissingFields(input: MemoInput): MissingField[] {
   return missing;
 }
 
+export function buildDiligenceChecklist(input: MemoInput): string[] {
+  const checklist: string[] = [];
+
+  const weakest = Object.entries(input.categories)
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, 3);
+  for (const [category, score] of weakest) {
+    if (score < 65) {
+      checklist.push(`Validate ${category.toLowerCase()} with primary-source evidence.`);
+    }
+  }
+
+  for (const missing of identifyMissingFields(input).slice(0, 3)) {
+    checklist.push(`Collect missing input: ${missing.label}.`);
+  }
+
+  if (input.failedGates.some((g) => g.name.toLowerCase().includes("confidence"))) {
+    checklist.push("Run full deep diligence before any capital decision.");
+  }
+
+  if (checklist.length === 0) {
+    checklist.push("Pressure-test founder claims against customer/reference evidence.");
+  }
+
+  return checklist.slice(0, 5);
+}
+
 /**
  * Generate an IC memo using Claude Haiku.
  *
@@ -237,12 +265,14 @@ export async function generateMemo(
     }
 
     const missingData = identifyMissingFields(input);
+    const diligenceChecklist = buildDiligenceChecklist(input);
 
     return {
       thesis: parsed.thesis,
       evidence: parsed.evidence.filter((e: unknown) => typeof e === "string"),
       risks: parsed.risks.filter((r: unknown) => typeof r === "string"),
       missingData,
+      diligenceChecklist,
       verdict: parsed.verdict,
     };
   } catch {

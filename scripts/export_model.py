@@ -213,11 +213,16 @@ def main(
             test=len(test_rows),
         )
 
-        trained = train_model(train_rows, test_rows)
+        trained = train_model(
+            train_rows,
+            test_rows,
+            allow_challenger=False,  # export path currently supports tree-walker HGBT only
+        )
         logger.info(
             "model_trained",
             auc=f"{trained.auc:.3f}",
             ece=f"{trained.ece:.3f}",
+            model_name=trained.model_name,
         )
 
         export_model(trained, Path(output))

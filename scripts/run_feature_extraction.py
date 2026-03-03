@@ -13,6 +13,7 @@ from startuplens.db import execute_query, get_connection, refresh_matview
 from startuplens.feature_store.extractors import (
     extract_campaign_features,
     extract_company_features,
+    extract_evidence_features,
     extract_financial_features,
     extract_market_regime_features,
     extract_regulatory_features,
@@ -32,6 +33,7 @@ ALL_EXTRACTORS = [
     ("terms", extract_terms_features),
     ("regulatory", extract_regulatory_features),
     ("market_regime", extract_market_regime_features),
+    ("evidence", extract_evidence_features),
 ]
 
 
@@ -94,6 +96,16 @@ def main(
                 fr.instrument_type,
                 fr.amount_raised AS fr_amount_raised,
                 fr.platform,
+                fr.valuation_cap,
+                fr.discount_rate,
+                fr.mfn_clause,
+                fr.liquidation_preference_multiple AS liquidation_pref_multiple,
+                fr.liquidation_participation,
+                fr.seniority_position,
+                fr.pro_rata_rights,
+                fr.qsbs_eligible,
+                -- aggregate prior funding
+                fr_tot.total_prior_funding,
                 -- financial_data fields (most recent filing)
                 fd.total_assets,
                 fd.total_debt,
@@ -103,13 +115,20 @@ def main(
                 fd.employee_count,
                 fd.net_income,
                 fd.revenue AS fd_revenue,
-                fd.revenue_growth_yoy AS revenue_growth_rate
+                fd.revenue_growth_yoy AS revenue_growth_rate,
+                c.current_status AS company_status
             FROM canonical_entities ce
             JOIN entity_links el ON el.entity_id = ce.id
             JOIN companies c
                 ON c.source_id = el.source_identifier AND el.source = c.source
             LEFT JOIN crowdfunding_outcomes co ON co.company_id = c.id
             LEFT JOIN funding_rounds fr ON fr.company_id = c.id
+            LEFT JOIN LATERAL (
+                SELECT SUM(fr3.amount_raised) AS total_prior_funding
+                FROM funding_rounds fr3
+                WHERE fr3.company_id = c.id
+                  AND fr3.round_date < COALESCE(co.campaign_date, fr.round_date)
+            ) fr_tot ON true
             LEFT JOIN LATERAL (
                 SELECT *
                 FROM financial_data fd2

@@ -32,7 +32,12 @@ from startuplens.backtest.text_score_auc import compute_claude_text_auc
 from startuplens.config import get_settings
 from startuplens.db import execute_query, get_connection, refresh_matview
 from startuplens.model.progress_labels import load_progress_labels
-from startuplens.model.train import score_deals, train_model, train_progress_model
+from startuplens.model.train import (
+    filter_rows_for_family,
+    score_deals,
+    train_model,
+    train_progress_model,
+)
 
 logger = structlog.get_logger(__name__)
 app = typer.Typer()
@@ -46,6 +51,7 @@ _FEATURE_QUERY = """
         tfw.sector,
         tfw.platform,
         tfw.country,
+        COALESCE(co.stage_bucket, 'unknown') AS stage_bucket,
         tfw.company_age_months,
         tfw.employee_count,
         tfw.revenue_at_raise,
@@ -201,12 +207,26 @@ def main(
 
         for window in windows:
             # Load train and test data as full feature rows
-            train_rows = _load_deals(
+            train_rows_all = _load_deals(
                 conn, window.train_start.isoformat(), window.train_end.isoformat(),
             )
-            test_rows = _load_deals(
+            test_rows_all = _load_deals(
                 conn, window.test_start.isoformat(), window.test_end.isoformat(),
             )
+
+            train_rows = filter_rows_for_family(train_rows_all, model_family)
+            test_rows = filter_rows_for_family(test_rows_all, model_family)
+
+            # Fallback to pooled rows if family sample is too small.
+            if len(train_rows) < 120 or len(test_rows) < 30:
+                logger.warning(
+                    "family_sample_too_small_fallback_pooled",
+                    family=model_family,
+                    train_family=len(train_rows),
+                    test_family=len(test_rows),
+                )
+                train_rows = train_rows_all
+                test_rows = test_rows_all
 
             logger.info(
                 "loaded_window",
@@ -238,6 +258,7 @@ def main(
                     window=window.label,
                     auc=f"{trained.auc:.3f}",
                     ece=f"{trained.ece:.3f}",
+                    model_name=trained.model_name,
                     n_train=trained.n_train,
                     n_test=trained.n_test,
                     top_features=sorted(

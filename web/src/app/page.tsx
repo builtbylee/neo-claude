@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import AnalystWorkbench from "@/components/AnalystWorkbench";
 import ScoreForm from "@/components/ScoreForm";
 import ScoreResult from "@/components/ScoreResult";
+import { getSupabaseBrowserClient } from "@/lib/auth/supabase-browser";
 
 type ScoreResponse = {
   score: number;
@@ -37,6 +39,7 @@ type ScoreResponse = {
     thesis: string;
     evidence: string[];
     risks: string[];
+    diligenceChecklist: string[];
     missingData: Array<{
       field: string;
       label: string;
@@ -138,6 +141,67 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState<ScoreResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState(
+    process.env.NEXT_PUBLIC_DEFAULT_USER_EMAIL ?? "owner@example.com",
+  );
+  const [authReady, setAuthReady] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+  useEffect(() => {
+    const enableGoogleAuth =
+      process.env.NEXT_PUBLIC_ENABLE_GOOGLE_AUTH === "true";
+    setAuthEnabled(enableGoogleAuth);
+    if (!enableGoogleAuth) {
+      setAuthReady(true);
+      return;
+    }
+
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) {
+      setAuthReady(true);
+      return;
+    }
+    void supabase.auth.getSession().then(({ data }) => {
+      const email = data.session?.user?.email;
+      if (email) {
+        setUserEmail(email);
+        setIsAuthenticated(true);
+      } else {
+        setIsAuthenticated(false);
+      }
+      setAuthReady(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      const email = session?.user?.email;
+      if (email) {
+        setUserEmail(email);
+        setIsAuthenticated(true);
+      } else {
+        setIsAuthenticated(false);
+      }
+    });
+    return () => {
+      sub.subscription.unsubscribe();
+    };
+  }, []);
+
+  async function signInWithGoogle() {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) return;
+    await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: window.location.origin,
+      },
+    });
+  }
+
+  async function signOut() {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) return;
+    await supabase.auth.signOut();
+  }
 
   const handleSubmit = async (data: {
     companyName: string;
@@ -160,7 +224,10 @@ export default function Home() {
     try {
       const response = await fetch("/api/score/quick", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-email": userEmail,
+        },
         body: JSON.stringify(data),
       });
 
@@ -194,6 +261,20 @@ export default function Home() {
           <span className="text-xs px-2 py-1 rounded bg-neutral-800 text-neutral-400">
             Quick Score
           </span>
+        </div>
+        <div className="max-w-4xl mx-auto px-6 pb-4 flex items-center justify-between text-xs text-neutral-500">
+          <span>User: {userEmail}</span>
+          {authEnabled && authReady ? (
+            <button
+              type="button"
+              onClick={() =>
+                isAuthenticated ? void signOut() : void signInWithGoogle()
+              }
+              className="rounded border border-neutral-700 px-2 py-1 text-neutral-300"
+            >
+              {isAuthenticated ? "Sign out" : "Sign in with Google"}
+            </button>
+          ) : null}
         </div>
       </header>
 
@@ -246,6 +327,8 @@ export default function Home() {
             )}
           </div>
         </div>
+
+        <AnalystWorkbench userEmail={userEmail} />
       </main>
 
       {/* Footer */}

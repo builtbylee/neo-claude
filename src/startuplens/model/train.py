@@ -17,6 +17,11 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import roc_auc_score
 
+try:  # pragma: no cover - environment-dependent native dependency.
+    from xgboost import XGBClassifier
+except Exception:  # noqa: BLE001
+    XGBClassifier = None
+
 from startuplens.backtest.metrics import compute_ece
 
 # Features used for training — must match training_features_wide columns.
@@ -26,17 +31,44 @@ FEATURE_COLUMNS = [
     "employee_count",
     "revenue_at_raise",
     "pre_revenue",
+    "revenue_growth_rate",
+    "total_prior_funding",
     "total_assets",
     "total_debt",
     "debt_to_asset_ratio",
     "cash_position",
+    "burn_rate_monthly",
+    "gross_margin",
     "funding_target",
     "amount_raised",
     "overfunding_ratio",
+    "equity_offered_pct",
+    "pre_money_valuation",
+    "investor_count",
+    "funding_velocity_days",
+    "valuation_cap",
+    "discount_rate",
+    "liquidation_pref_multiple",
+    "seniority_position",
+    "charges_count",
+    "director_disqualifications",
+    "ecf_quarterly_volume",
+    "data_source_count",
+    "field_completeness_ratio",
 ]
 
 # Categorical features encoded as strings → need ordinal encoding
-CATEGORICAL_FEATURES = ["instrument_type", "platform", "country"]
+CATEGORICAL_FEATURES = [
+    "instrument_type",
+    "platform",
+    "country",
+    "sector",
+    "revenue_model_type",
+    "company_status",
+    "interest_rate_regime",
+    "equity_market_regime",
+    "liquidation_participation",
+]
 
 # Progress model uses base features + YoY growth features from prior/current FY.
 PROGRESS_FEATURE_COLUMNS = FEATURE_COLUMNS + [
@@ -59,6 +91,24 @@ class TrainedModel:
     n_train: int
     n_test: int
     feature_importances: dict[str, float]
+    model_name: str = "hgb"
+
+
+class AveragedEnsemble:
+    """Simple weighted-probability ensemble over binary classifiers."""
+
+    def __init__(self, models: list[Any], weights: list[float]) -> None:
+        if len(models) != len(weights):
+            raise ValueError("models and weights length mismatch")
+        total = sum(weights) or 1.0
+        self.models = models
+        self.weights = [w / total for w in weights]
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:  # noqa: N803
+        weighted = np.zeros((X.shape[0], 2), dtype=float)
+        for model, weight in zip(self.models, self.weights):
+            weighted += weight * model.predict_proba(X)
+        return weighted
 
 
 def _build_feature_matrix(
@@ -68,7 +118,9 @@ def _build_feature_matrix(
 ) -> np.ndarray:
     """Convert list of dicts into a numpy feature matrix.
 
-    Numeric features are passed through (None → NaN for sklearn).
+    Numeric features are passed through. For sparse wide schemas, missing numeric
+    values default to 0.0 when the row has at least one observed signal, while
+    fully-empty rows remain all-NaN (degenerate case detection).
     Categorical features are hashed to integers.
     """
     all_cols = feature_columns + categorical_columns
@@ -77,9 +129,14 @@ def _build_feature_matrix(
     X = np.full((n_rows, n_cols), np.nan)  # noqa: N806
 
     for i, row in enumerate(rows):
+        has_any_signal = any(row.get(col) is not None for col in all_cols)
         for j, col in enumerate(all_cols):
             val = row.get(col)
             if val is None:
+                if has_any_signal and col in feature_columns:
+                    # Sparse numeric families are common; zero-fill avoids
+                    # collapsing mostly-populated rows into near-all-NaN.
+                    X[i, j] = 0.0
                 continue
             if col in categorical_columns:
                 # Hash string to integer for tree-based model
@@ -101,11 +158,41 @@ def _build_target(rows: list[dict]) -> np.ndarray:
     return y
 
 
+def _compute_sample_weights(y: np.ndarray) -> np.ndarray:
+    """Inverse-frequency sample weights with bounded ratio for calibration stability."""
+    positives = max(int(np.sum(y == 1)), 1)
+    negatives = max(int(np.sum(y == 0)), 1)
+    pos_w = min(negatives / positives, 10.0)
+    neg_w = min(positives / negatives, 10.0)
+    return np.where(y == 1, pos_w, neg_w).astype(float)
+
+
+def _calibrate_classifier(
+    clf: Any,
+    X_train: np.ndarray,  # noqa: N803
+    y_train: np.ndarray,
+    strategy: str = "auto",
+) -> tuple[Any, str]:
+    """Calibrate with Platt (sigmoid) by default, isotonic only when sample is large."""
+    if strategy == "none":
+        return clf, "none"
+    method = "sigmoid"
+    if strategy == "isotonic":
+        method = "isotonic"
+    elif strategy == "auto" and len(y_train) >= 500:
+        method = "isotonic"
+    calibrated = CalibratedClassifierCV(clf, cv=3, method=method)
+    calibrated.fit(X_train, y_train)
+    return calibrated, method
+
+
 def train_model(
     train_rows: list[dict],
     test_rows: list[dict],
     *,
     calibrate: bool = True,
+    calibration_strategy: str = "auto",
+    allow_challenger: bool = True,
 ) -> TrainedModel:
     """Train a HistGradientBoostingClassifier and evaluate on test set.
 
@@ -129,43 +216,79 @@ def train_model(
     y_test = _build_target(test_labeled)
 
     # Train
-    clf = HistGradientBoostingClassifier(
+    sample_weights = _compute_sample_weights(y_train)
+
+    hgb = HistGradientBoostingClassifier(
         max_iter=200,
         max_depth=5,
         learning_rate=0.1,
         min_samples_leaf=20,
         random_state=42,
     )
-    clf.fit(X_train, y_train)
+    hgb.fit(X_train, y_train, sample_weight=sample_weights)
+
+    xgb = None
+    if allow_challenger and XGBClassifier is not None:
+        xgb = XGBClassifier(
+            objective="binary:logistic",
+            n_estimators=250,
+            max_depth=5,
+            learning_rate=0.06,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            reg_lambda=1.0,
+            min_child_weight=5,
+            eval_metric="logloss",
+            random_state=42,
+        )
+        xgb.fit(X_train, y_train, sample_weight=sample_weights)
 
     # Calibrate probabilities if requested and we have enough data
-    if calibrate and len(train_labeled) >= 100:
-        cal_clf = CalibratedClassifierCV(clf, cv=3, method="isotonic")
-        cal_clf.fit(X_train, y_train)
-        model = cal_clf
+    if calibrate and len(train_labeled) >= 120:
+        hgb_model, _ = _calibrate_classifier(hgb, X_train, y_train, calibration_strategy)
+        if xgb is not None:
+            xgb_model, _ = _calibrate_classifier(xgb, X_train, y_train, calibration_strategy)
+        else:
+            xgb_model = None
     else:
-        model = clf
+        hgb_model = hgb
+        xgb_model = xgb
 
     # Evaluate
-    y_pred_proba = model.predict_proba(X_test)[:, 1]  # P(failed)
+    hgb_pred = hgb_model.predict_proba(X_test)[:, 1]
+    if len(set(y_test)) > 1:
+        hgb_auc = roc_auc_score(y_test, hgb_pred)
+    else:
+        hgb_auc = 0.5
+    candidates = [("hgb", hgb_model, hgb_pred, hgb_auc)]
 
-    auc = roc_auc_score(y_test, y_pred_proba) if len(set(y_test)) > 1 else 0.5
-    ece = compute_ece(y_test.tolist(), y_pred_proba.tolist())
+    if xgb_model is not None:
+        xgb_pred = xgb_model.predict_proba(X_test)[:, 1]
+        xgb_auc = roc_auc_score(y_test, xgb_pred) if len(set(y_test)) > 1 else 0.5
+        candidates.append(("xgb", xgb_model, xgb_pred, xgb_auc))
+        ensemble = AveragedEnsemble([hgb_model, xgb_model], [0.5, 0.5])
+        ens_pred = ensemble.predict_proba(X_test)[:, 1]
+        ens_auc = roc_auc_score(y_test, ens_pred) if len(set(y_test)) > 1 else 0.5
+        candidates.append(("ensemble", ensemble, ens_pred, ens_auc))
+    best_name, best_model, best_pred, best_auc = max(candidates, key=lambda t: t[3])
+    auc = best_auc
+    ece = compute_ece(y_test.tolist(), best_pred.tolist())
 
     # Feature importances via permutation importance on test set
     perm = permutation_importance(
-        clf, X_test, y_test, n_repeats=5, random_state=42, scoring="roc_auc",
+        hgb, X_test, y_test, n_repeats=5, random_state=42, scoring="roc_auc",
     )
     importances = {f: float(v) for f, v in zip(all_features, perm.importances_mean)}
 
     return TrainedModel(
-        model=model,
+        model=best_model,
         feature_names=all_features,
         auc=auc,
         ece=ece,
         n_train=len(train_labeled),
         n_test=len(test_labeled),
         feature_importances=importances,
+        model_name=best_name,
     )
 
 
@@ -192,6 +315,7 @@ def train_progress_model(
     test_labels: dict[str, int],
     *,
     calibrate: bool = True,
+    calibration_strategy: str = "auto",
 ) -> TrainedModel | None:
     """Train a progress model predicting 18-24 month milestone achievement.
 
@@ -231,6 +355,7 @@ def train_progress_model(
     if len(set(y_train)) < 2 or len(set(y_test)) < 2:
         return None
 
+    sample_weights = _compute_sample_weights(y_train)
     clf = HistGradientBoostingClassifier(
         max_iter=200,
         max_depth=5,
@@ -238,12 +363,10 @@ def train_progress_model(
         min_samples_leaf=20,
         random_state=42,
     )
-    clf.fit(X_train, y_train)
+    clf.fit(X_train, y_train, sample_weight=sample_weights)
 
     if calibrate and len(train_labeled) >= 100:
-        cal_clf = CalibratedClassifierCV(clf, cv=3, method="isotonic")
-        cal_clf.fit(X_train, y_train)
-        model = cal_clf
+        model, _ = _calibrate_classifier(clf, X_train, y_train, calibration_strategy)
     else:
         model = clf
 
@@ -264,7 +387,28 @@ def train_progress_model(
         n_train=len(train_labeled),
         n_test=len(test_labeled),
         feature_importances=importances,
+        model_name="hgb_progress",
     )
+
+
+def filter_rows_for_family(rows: list[dict], family: str) -> list[dict]:
+    """Filter rows for stage-country family with pooled fallback handled by caller."""
+    family_map = {
+        "UK_Seed": ("UK", "seed"),
+        "UK_EarlyGrowth": ("UK", "early_growth"),
+        "US_Seed": ("US", "seed"),
+        "US_EarlyGrowth": ("US", "early_growth"),
+    }
+    if family not in family_map:
+        return rows
+    country, stage = family_map[family]
+    filtered = [
+        r
+        for r in rows
+        if (r.get("country") or "").upper() == country
+        and (r.get("stage_bucket") or "").lower() == stage
+    ]
+    return filtered
 
 
 def save_model(model: TrainedModel, path: Path) -> None:
