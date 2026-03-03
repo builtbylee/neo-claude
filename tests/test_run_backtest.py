@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 # Allow importing the scripts/ module
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from run_backtest import _enrich_growth_features  # noqa: E402
+from run_backtest import _FEATURE_QUERY, _enrich_growth_features  # noqa: E402
 
 
 class TestEnrichGrowthFeaturesPerRow:
@@ -91,3 +91,13 @@ class TestEnrichGrowthFeaturesPerRow:
         _enrich_growth_features(MagicMock(), rows)
 
         assert rows[0]["revenue_growth_yoy"] is None
+
+
+class TestFeatureQueryTemporalJoin:
+    """Verify training labels are time-aligned with feature as_of_date."""
+
+    def test_outcome_join_is_capped_to_as_of_date(self):
+        assert "co.campaign_date = tfw.as_of_date" in _FEATURE_QUERY
+
+    def test_order_by_is_deterministic_for_duplicates(self):
+        assert "co.campaign_date DESC NULLS LAST, c.id" in _FEATURE_QUERY

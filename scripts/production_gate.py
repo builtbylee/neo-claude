@@ -11,13 +11,13 @@ Exit codes:
 
 Usage:
     python scripts/production_gate.py
-    python scripts/production_gate.py --export-model
     python scripts/production_gate.py --skip-export
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -75,12 +75,12 @@ def main(
         logger.info("refreshing_matview")
         refresh_matview(conn)
         logger.info("matview_refreshed")
+        pre_backtest_run = _load_latest_backtest_run(conn)
+        pre_backtest_run_id = pre_backtest_run["id"] if pre_backtest_run else None
 
         if not skip_backtest:
             # Step 2: Run the backtest
             logger.info("running_backtest")
-            import subprocess
-
             result = subprocess.run(
                 [sys.executable, "scripts/run_backtest.py"],
                 capture_output=True,
@@ -101,6 +101,21 @@ def main(
         if run is None:
             logger.error("no_backtest_runs_found")
             typer.echo("FAIL: No backtest runs found in database.", err=True)
+            raise SystemExit(2)
+        if (
+            not skip_backtest
+            and pre_backtest_run_id is not None
+            and run["id"] <= pre_backtest_run_id
+        ):
+            logger.error(
+                "backtest_run_not_fresh",
+                previous_run_id=pre_backtest_run_id,
+                latest_run_id=run["id"],
+            )
+            typer.echo(
+                "FAIL: Backtest did not produce a new run; refusing to use stale metrics.",
+                err=True,
+            )
             raise SystemExit(2)
 
         metrics_raw = run["metrics"]
@@ -153,8 +168,6 @@ def main(
         # Step 5: Re-export model if metrics pass
         if not skip_export:
             logger.info("exporting_model", output=output)
-            import subprocess
-
             result = subprocess.run(
                 [sys.executable, "scripts/export_model.py", "--output", output],
                 capture_output=True,
@@ -167,7 +180,8 @@ def main(
                     returncode=result.returncode,
                     stderr=result.stderr[-500:] if result.stderr else "",
                 )
-                typer.echo("WARNING: Model export failed.", err=True)
+                typer.echo("FAIL: Model export failed.", err=True)
+                raise SystemExit(2)
             else:
                 size = Path(output).stat().st_size / 1024
                 typer.echo(f"Model exported to {output} ({size:.1f} KB)")

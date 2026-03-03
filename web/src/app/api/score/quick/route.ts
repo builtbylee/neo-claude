@@ -134,17 +134,9 @@ export async function POST(request: NextRequest) {
   // Override with user-provided values
   if (body.revenue !== undefined) features.revenue_at_raise = body.revenue;
   if (body.fundingTarget !== undefined) features.funding_target = body.fundingTarget;
-  if (body.sector) features.platform = undefined; // Use sector from input
 
   // Step 2: ML inference
   let mlScore = 35; // Sceptical baseline if no model
-
-  try {
-    const result = predict(MODEL, features);
-    mlScore = result.score;
-  } catch {
-    // Model inference failed — use baseline
-  }
 
   // Step 3: Resolve pitch text source and run Claude scoring
   let textResult: Awaited<ReturnType<typeof scoreText>> = null;
@@ -234,6 +226,15 @@ export async function POST(request: NextRequest) {
     if (extractedFacts.companyAgeMonths !== null && !features.company_age_months) {
       features.company_age_months = extractedFacts.companyAgeMonths;
     }
+  }
+
+  // Step 3c: Re-run ML inference after enrichment so extracted facts can
+  // influence the model score when user/DB fields were missing.
+  try {
+    const result = predict(MODEL, features);
+    mlScore = result.score;
+  } catch {
+    // Model inference failed — use baseline
   }
 
   // Step 4: Rubric scoring

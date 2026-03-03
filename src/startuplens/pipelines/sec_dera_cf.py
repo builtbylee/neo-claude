@@ -441,6 +441,7 @@ def ingest_dera_cf_batch(conn: psycopg.Connection, records: list[dict]) -> int:
             overfunding = None
             if amount and max_amount and max_amount > 0:
                 overfunding = round(amount / max_amount, 4)
+            qsbs_eligible = rec.get("qsbs_eligible")
 
             fr_rows.append((
                 company_id,
@@ -452,7 +453,7 @@ def ingest_dera_cf_batch(conn: psycopg.Connection, records: list[dict]) -> int:
                 rec.get("platform_name"),
                 "sec_dera_cf",
                 overfunding,
-                rec.get("oversubscription_accepted"),
+                qsbs_eligible,
             ))
 
         if fr_rows:

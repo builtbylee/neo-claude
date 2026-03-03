@@ -390,6 +390,36 @@ class TestIngestDeraCfBatch:
         assert count == 1
         mock_conn.commit.assert_called_once()
 
+    def test_does_not_map_oversubscription_to_qsbs(self, mock_conn: MagicMock):
+        """oversubscription_accepted must not be written into qsbs_eligible."""
+        records = [
+            {
+                "name": "Test Corp",
+                "country": "US",
+                "source": "sec_dera_cf",
+                "source_id": "1234_q2024Q4",
+                "date_incorporation": "2020-01-01",
+                "filing_date": "2024-10-15",
+                "offering_amount": 500000.0,
+                "max_offering_amount": 1000000.0,
+                "instrument_type": "equity",
+                "platform_name": "Wefunder",
+                "oversubscription_accepted": True,
+                "revenue_recent": 150000.0,
+            },
+        ]
+        ingest_dera_cf_batch(mock_conn, records)
+
+        cursor = mock_conn.cursor.return_value.__enter__.return_value
+        fr_calls = [
+            c for c in cursor.execute.call_args_list
+            if "INSERT INTO funding_rounds" in c.args[0]
+        ]
+        assert fr_calls, "Expected funding_rounds insert query"
+        params = fr_calls[0].args[1]
+        # funding_rounds tuple index 9 = qsbs_eligible
+        assert params[9] is None
+
 
 # ---------------------------------------------------------------------------
 # _is_quarter_ingested_cf

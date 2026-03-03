@@ -186,9 +186,11 @@ def main(
             FROM training_features_wide tfw
             LEFT JOIN companies c ON c.entity_id = tfw.entity_id
             LEFT JOIN crowdfunding_outcomes co
-                ON co.company_id = c.id AND co.label_quality_tier <= 2
+                ON co.company_id = c.id
+                AND co.label_quality_tier <= 2
+                AND co.campaign_date = tfw.as_of_date
             WHERE tfw.as_of_date BETWEEN %s AND %s
-            ORDER BY tfw.entity_id, tfw.as_of_date, co.campaign_date DESC NULLS LAST
+            ORDER BY tfw.entity_id, tfw.as_of_date, co.campaign_date DESC NULLS LAST, c.id
         """
 
         all_rows = execute_query(
