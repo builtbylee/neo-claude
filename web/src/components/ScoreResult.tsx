@@ -28,6 +28,22 @@ interface ScoreResultProps {
     matchedCompany: string | null;
     dataSource: "user" | "website" | "ai_knowledge" | "none";
     generatedProfile: string | null;
+    memo: {
+      thesis: string;
+      evidence: string[];
+      risks: string[];
+      missingData: Array<{
+        field: string;
+        label: string;
+        impact: string;
+      }>;
+      verdict: string;
+    } | null;
+    missingFields: Array<{
+      field: string;
+      label: string;
+      impact: string;
+    }>;
   };
 }
 
@@ -120,8 +136,8 @@ function CategoryBar({
 
 export default function ScoreResult({ result }: ScoreResultProps) {
   const recColor = REC_COLORS[result.recommendation.class] ?? "bg-neutral-600";
-
   const failedGates = result.gates.filter((g) => !g.passed);
+  const isAbstain = result.recommendation.class === "abstain";
 
   const extractedHeading =
     result.dataSource === "website"
@@ -151,6 +167,87 @@ export default function ScoreResult({ result }: ScoreResultProps) {
           )}
         </div>
       </div>
+
+      {/* IC Memo — shown prominently before category breakdown */}
+      {result.memo && (
+        <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+          <h3 className="text-sm font-semibold text-neutral-300 mb-3">
+            Investment Memo
+          </h3>
+
+          {/* Thesis */}
+          <p className="text-sm text-neutral-200 mb-4 leading-relaxed">
+            {result.memo.thesis}
+          </p>
+
+          {/* Evidence */}
+          <div className="mb-4">
+            <h4 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-2">
+              Evidence
+            </h4>
+            <ul className="space-y-1.5">
+              {result.memo.evidence.map((point, i) => (
+                <li key={i} className="flex items-start gap-2 text-sm text-neutral-300">
+                  <span className="text-green-500 mt-0.5 shrink-0">+</span>
+                  <span>{point}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {/* Risks */}
+          <div className="mb-4">
+            <h4 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-2">
+              Key Risks
+            </h4>
+            <ul className="space-y-1.5">
+              {result.memo.risks.map((risk, i) => (
+                <li key={i} className="flex items-start gap-2 text-sm text-neutral-300">
+                  <span className="text-red-400 mt-0.5 shrink-0">-</span>
+                  <span>{risk}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {/* Verdict */}
+          <div className="border-t border-neutral-700/50 pt-3">
+            <h4 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-2">
+              Verdict
+            </h4>
+            <p className="text-sm text-neutral-200 leading-relaxed">
+              {result.memo.verdict}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Actionable Abstain — show missing fields with impact */}
+      {isAbstain && result.missingFields.length > 0 && (
+        <div className="bg-amber-950/20 rounded-xl p-5 border border-amber-800/30">
+          <h3 className="text-sm font-semibold text-amber-400 mb-1">
+            More Data Needed
+          </h3>
+          <p className="text-xs text-neutral-400 mb-3">
+            Provide any of these to unlock a full assessment:
+          </p>
+          <div className="space-y-3">
+            {result.missingFields.map((mf) => (
+              <div key={mf.field} className="flex items-start gap-2">
+                <span className="text-amber-500 mt-0.5 shrink-0 text-sm">?</span>
+                <div>
+                  <span className="text-sm text-neutral-200 font-medium">
+                    {mf.label}
+                  </span>
+                  <p className="text-xs text-neutral-500 mt-0.5">
+                    {mf.impact}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Category Breakdown */}
       <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
@@ -258,7 +355,7 @@ export default function ScoreResult({ result }: ScoreResultProps) {
       )}
 
       {/* Gates */}
-      {failedGates.length > 0 && (
+      {failedGates.length > 0 && !isAbstain && (
         <div className="bg-red-950/30 rounded-xl p-5 border border-red-800/30">
           <h3 className="text-sm font-semibold text-red-400 mb-3">
             Gate Alerts

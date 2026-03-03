@@ -32,6 +32,22 @@ type ScoreResponse = {
   matchedCompany: string | null;
   dataSource: "user" | "website" | "ai_knowledge" | "none";
   generatedProfile: string | null;
+  memo: {
+    thesis: string;
+    evidence: string[];
+    risks: string[];
+    missingData: Array<{
+      field: string;
+      label: string;
+      impact: string;
+    }>;
+    verdict: string;
+  } | null;
+  missingFields: Array<{
+    field: string;
+    label: string;
+    impact: string;
+  }>;
 };
 
 export default function Home() {

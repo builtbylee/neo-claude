@@ -8,6 +8,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { buildProfile, scoreText, type ExtractedFacts } from "@/lib/claude/text-scorer";
+import { generateMemo, identifyMissingFields, type ICMemo, type MissingField } from "@/lib/claude/memo-generator";
 import { findCompany, getSupabaseClient, loadFeatures } from "@/lib/db/supabase";
 import { scrapeWebsite } from "@/lib/enrichment/website-scraper";
 import { scoreFromKnowledge } from "@/lib/enrichment/knowledge-enrichment";
@@ -49,6 +50,8 @@ interface QuickScoreResponse {
   matchedCompany: string | null;
   dataSource: "user" | "website" | "ai_knowledge" | "none";
   generatedProfile: string | null;
+  memo: ICMemo | null;
+  missingFields: MissingField[];
 }
 
 export async function POST(request: NextRequest) {
@@ -249,6 +252,50 @@ export async function POST(request: NextRequest) {
     gates,
   );
 
+  // Step 7: IC Memo generation + missing fields analysis
+  const failedGates = gates.filter((g) => !g.passed);
+  const memoInput = {
+    companyName: body.companyName,
+    sector: body.sector ?? null,
+    matchedCompany: company?.name ?? null,
+    score: rubricResult.overallScore,
+    confidenceRange: rubricResult.confidenceRange,
+    recommendationLabel: recommendation.label,
+    recommendationDescription: recommendation.description,
+    recommendationClass: recommendation.class,
+    categories: {
+      "Text & Narrative": rubricResult.categories.textNarrative,
+      "Traction & Growth": rubricResult.categories.tractionGrowth,
+      "Deal Terms": rubricResult.categories.dealTerms,
+      "Team": rubricResult.categories.team,
+      "Financial Health": rubricResult.categories.financialHealth,
+      "Investment Signal": rubricResult.categories.investmentSignal,
+      "Market": rubricResult.categories.market,
+    },
+    textScores: textScores
+      ? Object.fromEntries(
+          Object.entries(textScores).map(([k, v]) => [k, v]),
+        )
+      : null,
+    extractedFacts: extractedFacts ?? null,
+    features: Object.keys(features).length > 0 ? (features as Record<string, number | string | null>) : null,
+    failedGates: failedGates.map((g) => ({ name: g.name, reason: g.reason })),
+    dataSource,
+    dataCompleteness: Math.round(rubricResult.dataCompleteness * 100),
+    generatedProfile,
+  };
+
+  const missingFields = identifyMissingFields(memoInput);
+
+  let memo: ICMemo | null = null;
+  if (anthropicKey) {
+    try {
+      memo = await generateMemo(anthropicKey, memoInput);
+    } catch {
+      // Memo generation failed — continue without it
+    }
+  }
+
   const response: QuickScoreResponse = {
     score: rubricResult.overallScore,
     confidenceRange: rubricResult.confidenceRange,
@@ -282,6 +329,8 @@ export async function POST(request: NextRequest) {
     matchedCompany: company?.name ?? null,
     dataSource,
     generatedProfile,
+    memo,
+    missingFields,
   };
 
   return NextResponse.json(response);
