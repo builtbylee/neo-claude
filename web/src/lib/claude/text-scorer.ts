@@ -72,6 +72,11 @@ export interface TextScoringResult {
   extractedFacts: ExtractedFacts;
 }
 
+export interface PdfDocumentInput {
+  name: string;
+  contentBase64: string;
+}
+
 const SCORE_DIMENSIONS: (keyof TextScores)[] = [
   "clarity",
   "claims_plausibility",
@@ -139,16 +144,41 @@ function parseExtractedFacts(obj: Record<string, unknown>): ExtractedFacts {
 export async function scoreText(
   apiKey: string,
   profile: string,
+  options?: {
+    pdfDocuments?: PdfDocumentInput[];
+  },
 ): Promise<TextScoringResult | null> {
   const client = new Anthropic({ apiKey });
 
   const prompt = USER_TEMPLATE.replace("{profile}", profile);
+  const pdfDocuments = options?.pdfDocuments ?? [];
+
+  const messageContent:
+    | string
+    | Array<Anthropic.Messages.TextBlockParam | Anthropic.Messages.DocumentBlockParam> =
+      pdfDocuments.length > 0
+        ? [
+            ...pdfDocuments.map((doc) => ({
+              type: "document" as const,
+              title: doc.name,
+              source: {
+                type: "base64" as const,
+                media_type: "application/pdf" as const,
+                data: doc.contentBase64,
+              },
+            })),
+            {
+              type: "text" as const,
+              text: prompt,
+            },
+          ]
+        : prompt;
 
   const response = await client.messages.create({
     model: "claude-haiku-4-5-20251001",
     max_tokens: 768,
     system: SYSTEM_PROMPT,
-    messages: [{ role: "user", content: prompt }],
+    messages: [{ role: "user", content: messageContent }],
   });
 
   let rawText =

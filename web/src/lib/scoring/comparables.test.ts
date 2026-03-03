@@ -13,6 +13,7 @@ type CohortRow = {
   funding_target: number | null;
   amount_raised: number | null;
   overfunding_ratio: number | null;
+  pre_money_valuation: number | null;
   company_age_at_raise_months: number | null;
   had_revenue: boolean | null;
   revenue_at_raise: number | null;
@@ -35,6 +36,7 @@ function row(
     funding_target: 500_000 + id,
     amount_raised: 550_000 + id,
     overfunding_ratio: 1.1,
+    pre_money_valuation: 2_000_000 + id * 10_000,
     company_age_at_raise_months: 24,
     had_revenue: true,
     revenue_at_raise: 250_000 + id,
@@ -77,6 +79,7 @@ test("findComparables uses staged fallback and preserves stage filter", async ()
 
   assert.ok(result);
   assert.equal(result.cohortStats.sampleSize, 24);
+  assert.equal(result.cohortStats.medianRevenueMultiple !== null, true);
   assert.match(result.cohortLabel, /Fintech companies \(seed\)/);
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0], { sector: "Fintech", country: "UK", stageBucket: "seed" });
@@ -111,6 +114,34 @@ test("findComparables excludes matched company from cohort stats and nearest dea
     result.nearestDeals.some((d) => d.name === "Target Co"),
     false,
   );
+});
+
+test("findComparables computes valuation context when valuation and revenue are present", async () => {
+  const rows = Array.from({ length: 30 }, (_, i) =>
+    row(i + 1, {
+      pre_money_valuation: 2_000_000 + i * 200_000,
+      revenue_at_raise: 200_000,
+    }),
+  );
+
+  const result = await findComparables(
+    {} as never,
+    {
+      sector: "Fintech",
+      country: "UK",
+      stageBucket: "seed",
+      preMoneyValuation: 6_000_000,
+      revenue: 300_000,
+    },
+    {
+      minCohort: 20,
+      queryCohortFn: async () => rows,
+    },
+  );
+
+  assert.ok(result);
+  assert.ok(result.valuationContext);
+  assert.equal(result.valuationContext?.impliedRevenueMultiple, 20);
 });
 
 test("queryCohort applies deterministic ordering and all filters", async () => {

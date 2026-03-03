@@ -17,6 +17,8 @@ export interface CohortStats {
   failureRate: number;
   survivalRate: number;
   exitRate: number;
+  medianPreMoneyValuation: number | null;
+  medianRevenueMultiple: number | null;
   medianFundingTarget: number | null;
   medianRevenueAtRaise: number | null;
   medianCompanyAgeMonths: number | null;
@@ -42,6 +44,15 @@ export interface ComparablesResult {
   cohortStats: CohortStats;
   cohortLabel: string;
   nearestDeals: Comparable[];
+  valuationContext: ValuationContext | null;
+}
+
+export interface ValuationContext {
+  valuationPercentile: number;
+  impliedRevenueMultiple: number;
+  cohortMedianMultiple: number;
+  signal: "attractive" | "fair" | "aggressive";
+  note: string;
 }
 
 interface CohortRow {
@@ -54,6 +65,7 @@ interface CohortRow {
   funding_target: number | null;
   amount_raised: number | null;
   overfunding_ratio: number | null;
+  pre_money_valuation: number | null;
   company_age_at_raise_months: number | null;
   had_revenue: boolean | null;
   revenue_at_raise: number | null;
@@ -90,6 +102,8 @@ function computeStats(rows: CohortRow[]): CohortStats {
       failureRate: 0,
       survivalRate: 0,
       exitRate: 0,
+      medianPreMoneyValuation: null,
+      medianRevenueMultiple: null,
       medianFundingTarget: null,
       medianRevenueAtRaise: null,
       medianCompanyAgeMonths: null,
@@ -115,6 +129,17 @@ function computeStats(rows: CohortRow[]): CohortStats {
   const overfunding = rows
     .map((r) => r.overfunding_ratio)
     .filter((v): v is number => v !== null && v > 0);
+  const preMoneyVals = rows
+    .map((r) => r.pre_money_valuation)
+    .filter((v): v is number => v !== null && v > 0);
+  const revenueMultiples = rows
+    .map((r) => {
+      if (!r.pre_money_valuation || !r.revenue_at_raise || r.revenue_at_raise <= 0) {
+        return null;
+      }
+      return r.pre_money_valuation / r.revenue_at_raise;
+    })
+    .filter((v): v is number => v !== null && isFinite(v) && v > 0);
 
   const institutional = rows.filter(
     (r) => r.qualified_institutional_coinvestor === true,
@@ -128,12 +153,60 @@ function computeStats(rows: CohortRow[]): CohortStats {
     failureRate: Math.round((failed / total) * 100) / 100,
     survivalRate: Math.round((trading / total) * 100) / 100,
     exitRate: Math.round((exited / total) * 100) / 100,
+    medianPreMoneyValuation: median(preMoneyVals),
+    medianRevenueMultiple: median(revenueMultiples),
     medianFundingTarget: median(fundingTargets),
     medianRevenueAtRaise: median(revenues),
     medianCompanyAgeMonths: median(ages),
     medianOverfundingRatio: median(overfunding),
     pctWithInstitutional: Math.round((institutional / total) * 100) / 100,
     pctPreRevenue: Math.round((preRevenue / total) * 100) / 100,
+  };
+}
+
+function computeValuationContext(
+  rows: CohortRow[],
+  input: { preMoneyValuation?: number | null; revenue?: number | null },
+): ValuationContext | null {
+  if (!input.preMoneyValuation || !input.revenue || input.revenue <= 0) {
+    return null;
+  }
+
+  const impliedRevenueMultiple = input.preMoneyValuation / input.revenue;
+  if (!isFinite(impliedRevenueMultiple) || impliedRevenueMultiple <= 0) return null;
+
+  const cohortMultiples = rows
+    .map((r) => {
+      if (!r.pre_money_valuation || !r.revenue_at_raise || r.revenue_at_raise <= 0) {
+        return null;
+      }
+      return r.pre_money_valuation / r.revenue_at_raise;
+    })
+    .filter((v): v is number => v !== null && isFinite(v) && v > 0);
+
+  if (cohortMultiples.length < 20) return null;
+
+  const lessOrEqual = cohortMultiples.filter((m) => m <= impliedRevenueMultiple).length;
+  const valuationPercentile = Math.round((lessOrEqual / cohortMultiples.length) * 100);
+  const cohortMedianMultiple = median(cohortMultiples);
+  if (cohortMedianMultiple === null) return null;
+
+  let signal: ValuationContext["signal"] = "fair";
+  let note = "Valuation is near the cohort middle.";
+  if (valuationPercentile >= 75) {
+    signal = "aggressive";
+    note = "Valuation is in the upper quartile vs comparable deals.";
+  } else if (valuationPercentile <= 30) {
+    signal = "attractive";
+    note = "Valuation is in the lower third vs comparable deals.";
+  }
+
+  return {
+    valuationPercentile,
+    impliedRevenueMultiple: Math.round(impliedRevenueMultiple * 10) / 10,
+    cohortMedianMultiple: Math.round(cohortMedianMultiple * 10) / 10,
+    signal,
+    note,
   };
 }
 
@@ -174,7 +247,7 @@ export async function queryCohort(
   filters: CohortFilters,
 ): Promise<CohortRow[]> {
   const selectFields =
-    "company_id, sector, country, stage_bucket, platform, campaign_date, funding_target, amount_raised, overfunding_ratio, company_age_at_raise_months, had_revenue, revenue_at_raise, qualified_institutional_coinvestor, outcome, companies(name)";
+    "company_id, sector, country, stage_bucket, platform, campaign_date, funding_target, amount_raised, overfunding_ratio, pre_money_valuation, company_age_at_raise_months, had_revenue, revenue_at_raise, qualified_institutional_coinvestor, outcome, companies(name)";
 
   let query = supabase
     .from("crowdfunding_outcomes")
@@ -209,6 +282,7 @@ export async function queryCohort(
     funding_target: r.funding_target as number | null,
     amount_raised: r.amount_raised as number | null,
     overfunding_ratio: r.overfunding_ratio as number | null,
+    pre_money_valuation: r.pre_money_valuation as number | null,
     company_age_at_raise_months: r.company_age_at_raise_months as number | null,
     had_revenue: r.had_revenue as boolean | null,
     revenue_at_raise: r.revenue_at_raise as number | null,
@@ -234,6 +308,7 @@ export async function findComparables(
     country?: string | null;
     stageBucket?: string | null;
     fundingTarget?: number | null;
+    preMoneyValuation?: number | null;
     companyAge?: number | null;
     revenue?: number | null;
     excludeCompanyId?: string | null;
@@ -298,6 +373,10 @@ export async function findComparables(
     if (cohortRows.length < minCohort) continue;
 
     const cohortStats = computeStats(cohortRows);
+    const valuationContext = computeValuationContext(cohortRows, {
+      preMoneyValuation: input.preMoneyValuation,
+      revenue: input.revenue,
+    });
 
     // Find nearest neighbors
     const ranked = cohortRows
@@ -326,6 +405,7 @@ export async function findComparables(
       cohortStats,
       cohortLabel: attempt.label,
       nearestDeals,
+      valuationContext,
     };
   }
 

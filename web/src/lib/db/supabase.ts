@@ -85,6 +85,10 @@ export interface DealTermsRow {
   qualified_institutional: boolean | null;
 }
 
+export interface FundingRoundRow extends DealTermsRow {
+  id: string;
+}
+
 /**
  * Load deal terms from the most recent funding round for a company.
  */
@@ -103,6 +107,27 @@ export async function loadDealTerms(
 
   if (data && data.length > 0) return data[0] as DealTermsRow;
   return null;
+}
+
+/**
+ * Load historical funding rounds (most recent first).
+ */
+export async function loadFundingHistory(
+  supabase: AnySupabaseClient,
+  companyId: string,
+  limit = 6,
+): Promise<FundingRoundRow[]> {
+  const { data } = await supabase
+    .from("funding_rounds")
+    .select(
+      "id, instrument_type, round_type, amount_raised, pre_money_valuation, platform, round_date, overfunding_ratio, investor_count, funding_velocity_days, eis_seis_eligible, qsbs_eligible, qualified_institutional",
+    )
+    .eq("company_id", companyId)
+    .order("round_date", { ascending: false })
+    .limit(limit);
+
+  if (!data) return [];
+  return data as FundingRoundRow[];
 }
 
 export interface RegulatoryRow {
@@ -146,4 +171,40 @@ export async function loadFeatures(
 
   if (data && data.length > 0) return data[0] as FeatureRow;
   return null;
+}
+
+export interface FeatureProvenanceRow {
+  feature_name: string;
+  source: string;
+  as_of_date: string;
+}
+
+/**
+ * Load latest provenance entries for selected features.
+ */
+export async function loadFeatureProvenance(
+  supabase: AnySupabaseClient,
+  entityId: string,
+  featureNames: string[],
+): Promise<FeatureProvenanceRow[]> {
+  if (featureNames.length === 0) return [];
+
+  const { data } = await supabase
+    .from("feature_store")
+    .select("feature_name, source, as_of_date")
+    .eq("entity_id", entityId)
+    .in("feature_name", featureNames)
+    .order("as_of_date", { ascending: false });
+
+  if (!data || data.length === 0) return [];
+
+  // Keep only the latest entry per feature.
+  const latestByFeature = new Map<string, FeatureProvenanceRow>();
+  for (const row of data as FeatureProvenanceRow[]) {
+    if (!latestByFeature.has(row.feature_name)) {
+      latestByFeature.set(row.feature_name, row);
+    }
+  }
+
+  return Array.from(latestByFeature.values());
 }

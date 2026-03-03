@@ -9,7 +9,18 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { buildProfile, scoreText, type ExtractedFacts } from "@/lib/claude/text-scorer";
 import { generateMemo, identifyMissingFields, type ICMemo, type MissingField } from "@/lib/claude/memo-generator";
-import { findCompany, getSupabaseClient, loadFeatures, loadDealTerms, loadRegulatoryData, type DealTermsRow } from "@/lib/db/supabase";
+import {
+  findCompany,
+  getSupabaseClient,
+  loadFeatures,
+  loadDealTerms,
+  loadFundingHistory,
+  loadFeatureProvenance,
+  loadRegulatoryData,
+  type DealTermsRow,
+  type FundingRoundRow,
+} from "@/lib/db/supabase";
+import { ingestDocuments, type UploadedDocument } from "@/lib/enrichment/document-ingestion";
 import { scrapeWebsite } from "@/lib/enrichment/website-scraper";
 import { scoreFromKnowledge } from "@/lib/enrichment/knowledge-enrichment";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
@@ -28,6 +39,7 @@ interface QuickScoreRequest {
   revenue?: number;
   fundingTarget?: number;
   pitchText?: string;
+  documents?: UploadedDocument[];
 }
 
 interface QuickScoreResponse {
@@ -35,6 +47,7 @@ interface QuickScoreResponse {
   confidenceRange: number;
   recommendation: {
     class: string;
+    originalClass: string;
     label: string;
     description: string;
   };
@@ -49,12 +62,28 @@ interface QuickScoreResponse {
     reason: string;
   }>;
   matchedCompany: string | null;
-  dataSource: "user" | "website" | "ai_knowledge" | "none";
+  dataSource: "user" | "document" | "website" | "ai_knowledge" | "none";
   generatedProfile: string | null;
   memo: ICMemo | null;
   missingFields: MissingField[];
   comparables: ComparablesResult | null;
   dealTerms: DealTermsRow | null;
+  fundingHistory: FundingRoundRow[];
+  assessmentWarning: string | null;
+  documentSummary: {
+    parsed: Array<{ name: string; mimeType: string; extractedChars: number }>;
+    warnings: string[];
+  };
+  provenance: {
+    newestAsOfDate: string | null;
+    stale: boolean;
+    fields: Array<{
+      feature: string;
+      source: string;
+      asOfDate: string;
+      stalenessDays: number;
+    }>;
+  } | null;
   regulatoryStatus: {
     companyStatus: string | null;
     companyNumber: string | null;
@@ -80,6 +109,8 @@ export async function POST(request: NextRequest) {
   let features: CompanyFeatures = {};
   let stageBucket: string | null = null;
   let dealTerms: DealTermsRow | null = null;
+  let fundingHistory: FundingRoundRow[] = [];
+  let provenance: QuickScoreResponse["provenance"] = null;
   let regulatoryStatus: { companyStatus: string | null; companyNumber: string | null } | null = null;
 
   if (supabaseUrl && supabaseKey) {
@@ -89,6 +120,7 @@ export async function POST(request: NextRequest) {
     if (company?.id) {
       try {
         dealTerms = await loadDealTerms(supabase, company.id);
+        fundingHistory = await loadFundingHistory(supabase, company.id);
       } catch {
         // Deal terms query failed — continue without
       }
@@ -128,6 +160,43 @@ export async function POST(request: NextRequest) {
           country: featureRow.country ?? company.country,
         };
       }
+
+      try {
+        const provenanceRows = await loadFeatureProvenance(supabase, company.entity_id, [
+          "revenue_at_raise",
+          "funding_target",
+          "company_age_months",
+          "employee_count",
+          "total_assets",
+          "total_debt",
+          "overfunding_ratio",
+        ]);
+
+        if (provenanceRows.length > 0) {
+          const now = new Date();
+          const fields = provenanceRows.map((row) => {
+            const asOfDate = row.as_of_date;
+            const ageMs = now.getTime() - new Date(asOfDate).getTime();
+            const stalenessDays = Math.max(0, Math.floor(ageMs / (24 * 60 * 60 * 1000)));
+            return {
+              feature: row.feature_name,
+              source: row.source,
+              asOfDate,
+              stalenessDays,
+            };
+          });
+          const newestAsOfDate = fields
+            .map((f) => f.asOfDate)
+            .sort((a, b) => (a > b ? -1 : 1))[0] ?? null;
+          provenance = {
+            newestAsOfDate,
+            stale: fields.every((f) => f.stalenessDays > 365),
+            fields,
+          };
+        }
+      } catch {
+        // Provenance query failed — continue without
+      }
     }
   }
 
@@ -138,23 +207,32 @@ export async function POST(request: NextRequest) {
   // Step 2: ML inference
   let mlScore = 35; // Sceptical baseline if no model
 
-  // Step 3: Resolve pitch text source and run Claude scoring
-  let textResult: Awaited<ReturnType<typeof scoreText>> = null;
-  let dataSource: "user" | "website" | "ai_knowledge" | "none" = "none";
-  let generatedProfile: string | null = null;
+  // Step 3: Prepare optional uploaded docs
+  const documentIngestion = await ingestDocuments(body.documents);
+  const documentsText = documentIngestion.combinedText;
 
-  if (body.pitchText?.trim() && anthropicKey) {
-    // Priority 1: User-provided pitch text
-    dataSource = "user";
+  // Step 4: Resolve pitch text source and run Claude scoring
+  let textResult: Awaited<ReturnType<typeof scoreText>> = null;
+  let dataSource: "user" | "document" | "website" | "ai_knowledge" | "none" = "none";
+  let generatedProfile: string | null = null;
+  const mergedPitchText = [body.pitchText?.trim(), documentsText]
+    .filter((v) => Boolean(v))
+    .join("\n\n");
+
+  if (mergedPitchText && anthropicKey) {
+    // Priority 1: user text and/or uploaded documents
+    dataSource = body.pitchText?.trim() ? "user" : "document";
     const profile = buildProfile({
       name: body.companyName,
       sector: body.sector,
       revenue: body.revenue,
       fundingTarget: body.fundingTarget,
-      pitchText: body.pitchText,
+      pitchText: mergedPitchText,
     });
     try {
-      textResult = await scoreText(anthropicKey, profile);
+      textResult = await scoreText(anthropicKey, profile, {
+        pdfDocuments: documentIngestion.pdfDocuments,
+      });
     } catch {
       // Claude scoring failed — continue
     }
@@ -171,7 +249,9 @@ export async function POST(request: NextRequest) {
           fundingTarget: body.fundingTarget,
           pitchText: scrapeResult.text,
         });
-        textResult = await scoreText(anthropicKey, profile);
+        textResult = await scoreText(anthropicKey, profile, {
+          pdfDocuments: documentIngestion.pdfDocuments,
+        });
       }
     } catch {
       // Scrape or scoring failed — fall through to knowledge
@@ -278,14 +358,28 @@ export async function POST(request: NextRequest) {
 
   const gates = checkGates(gateInput);
 
-  // Step 6: Recommendation
-  const recommendation = classify(
+  // Step 7: Recommendation
+  let recommendation = classify(
     rubricResult.overallScore,
     rubricResult.confidenceRange,
     gates,
   );
+  const originalRecommendationClass = recommendation.class;
+  let assessmentWarning: string | null = null;
 
-  // Step 7: IC Memo generation + missing fields analysis
+  // User-selected policy: route abstentions to Deep Diligence with explicit warning.
+  if (recommendation.class === "abstain") {
+    recommendation = {
+      ...recommendation,
+      class: "deep_diligence",
+      label: "Deep Diligence (Low Confidence)",
+      description: "Evidence is incomplete. Do not invest yet; run deeper diligence first.",
+    };
+    assessmentWarning =
+      "Model confidence is insufficient for a reliable recommendation. Treated as Deep Diligence by policy.";
+  }
+
+  // Step 8: IC Memo generation + missing fields analysis
   const failedGates = gates.filter((g) => !g.passed);
   const memoInput = {
     companyName: body.companyName,
@@ -329,7 +423,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Step 8: Comparables — find similar deals and compute cohort stats
+  // Step 9: Comparables — find similar deals and compute cohort stats
   let comparables: ComparablesResult | null = null;
   if (supabaseUrl && supabaseKey) {
     try {
@@ -339,6 +433,7 @@ export async function POST(request: NextRequest) {
         country: (features.country as string) ?? company?.country ?? null,
         stageBucket,
         fundingTarget: (features.funding_target as number) ?? body.fundingTarget ?? null,
+        preMoneyValuation: dealTerms?.pre_money_valuation ?? null,
         companyAge: (features.company_age_months as number) ?? null,
         revenue: effectiveRevenue,
         excludeCompanyId: company?.id ?? null,
@@ -353,6 +448,7 @@ export async function POST(request: NextRequest) {
     confidenceRange: rubricResult.confidenceRange,
     recommendation: {
       class: recommendation.class,
+      originalClass: originalRecommendationClass,
       label: recommendation.label,
       description: recommendation.description,
     },
@@ -385,6 +481,13 @@ export async function POST(request: NextRequest) {
     missingFields,
     comparables,
     dealTerms,
+    fundingHistory,
+    assessmentWarning,
+    documentSummary: {
+      parsed: documentIngestion.parsedDocuments,
+      warnings: documentIngestion.warnings,
+    },
+    provenance,
     regulatoryStatus,
   };
 

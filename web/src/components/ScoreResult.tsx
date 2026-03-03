@@ -6,6 +6,7 @@ interface ScoreResultProps {
     confidenceRange: number;
     recommendation: {
       class: string;
+      originalClass: string;
       label: string;
       description: string;
     };
@@ -26,7 +27,7 @@ interface ScoreResultProps {
       reason: string;
     }>;
     matchedCompany: string | null;
-    dataSource: "user" | "website" | "ai_knowledge" | "none";
+    dataSource: "user" | "document" | "website" | "ai_knowledge" | "none";
     generatedProfile: string | null;
     memo: {
       thesis: string;
@@ -62,12 +63,44 @@ interface ScoreResultProps {
       qsbs_eligible: boolean | null;
       qualified_institutional: boolean | null;
     } | null;
+    fundingHistory: Array<{
+      id: string;
+      instrument_type: string | null;
+      round_type: string | null;
+      amount_raised: number | null;
+      pre_money_valuation: number | null;
+      platform: string | null;
+      round_date: string | null;
+      overfunding_ratio: number | null;
+      investor_count: number | null;
+      funding_velocity_days: number | null;
+      eis_seis_eligible: boolean | null;
+      qsbs_eligible: boolean | null;
+      qualified_institutional: boolean | null;
+    }>;
+    assessmentWarning: string | null;
+    documentSummary: {
+      parsed: Array<{ name: string; mimeType: string; extractedChars: number }>;
+      warnings: string[];
+    };
+    provenance: {
+      newestAsOfDate: string | null;
+      stale: boolean;
+      fields: Array<{
+        feature: string;
+        source: string;
+        asOfDate: string;
+        stalenessDays: number;
+      }>;
+    } | null;
     comparables: {
       cohortStats: {
         sampleSize: number;
         failureRate: number;
         survivalRate: number;
         exitRate: number;
+        medianPreMoneyValuation: number | null;
+        medianRevenueMultiple: number | null;
         medianFundingTarget: number | null;
         medianRevenueAtRaise: number | null;
         medianCompanyAgeMonths: number | null;
@@ -76,6 +109,13 @@ interface ScoreResultProps {
         pctPreRevenue: number;
       };
       cohortLabel: string;
+      valuationContext: {
+        valuationPercentile: number;
+        impliedRevenueMultiple: number;
+        cohortMedianMultiple: number;
+        signal: "attractive" | "fair" | "aggressive";
+        note: string;
+      } | null;
       nearestDeals: Array<{
         name: string;
         sector: string | null;
@@ -101,6 +141,7 @@ const REC_COLORS: Record<string, string> = {
 
 const SOURCE_LABELS: Record<string, string> = {
   user: "AI analysis of your pitch text",
+  document: "AI analysis of uploaded documents",
   website: "AI analysis of website content",
   ai_knowledge: "AI analysis from training knowledge",
   none: "No text analysis available",
@@ -182,10 +223,15 @@ export default function ScoreResult({ result }: ScoreResultProps) {
   const recColor = REC_COLORS[result.recommendation.class] ?? "bg-neutral-600";
   const failedGates = result.gates.filter((g) => !g.passed);
   const isAbstain = result.recommendation.class === "abstain";
+  const routedFromAbstain =
+    result.recommendation.originalClass === "abstain" &&
+    result.recommendation.class !== "abstain";
 
   const extractedHeading =
     result.dataSource === "website"
       ? "Extracted from Website"
+      : result.dataSource === "document"
+        ? "Extracted from Uploaded Documents"
       : result.dataSource === "ai_knowledge"
         ? "Extracted from AI Knowledge"
         : "Extracted from Pitch Text";
@@ -211,6 +257,17 @@ export default function ScoreResult({ result }: ScoreResultProps) {
           )}
         </div>
       </div>
+
+      {result.assessmentWarning && (
+        <div className="bg-amber-950/20 rounded-xl p-5 border border-amber-800/30">
+          <h3 className="text-sm font-semibold text-amber-400 mb-1">
+            Confidence Warning
+          </h3>
+          <p className="text-sm text-neutral-300">
+            {result.assessmentWarning}
+          </p>
+        </div>
+      )}
 
       {/* IC Memo — shown prominently before category breakdown */}
       {result.memo && (
@@ -267,7 +324,7 @@ export default function ScoreResult({ result }: ScoreResultProps) {
       )}
 
       {/* Actionable Abstain — show missing fields with impact */}
-      {isAbstain && result.missingFields.length > 0 && (
+      {(isAbstain || routedFromAbstain) && result.missingFields.length > 0 && (
         <div className="bg-amber-950/20 rounded-xl p-5 border border-amber-800/30">
           <h3 className="text-sm font-semibold text-amber-400 mb-1">
             More Data Needed
@@ -388,6 +445,40 @@ export default function ScoreResult({ result }: ScoreResultProps) {
         </div>
       )}
 
+      {/* Funding Trajectory */}
+      {result.fundingHistory.length > 0 && (
+        <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+          <h3 className="text-sm font-semibold text-neutral-300 mb-3">
+            Funding Trajectory
+          </h3>
+          <div className="space-y-2">
+            {result.fundingHistory.map((round) => (
+              <div
+                key={round.id}
+                className="flex items-center justify-between text-sm py-1.5 border-b border-neutral-700/30 last:border-0"
+              >
+                <div className="min-w-0">
+                  <span className="text-neutral-200 font-medium capitalize">
+                    {(round.round_type ?? round.instrument_type ?? "round").replace(/_/g, " ")}
+                  </span>
+                  {round.round_date && (
+                    <span className="text-xs text-neutral-500 ml-2">{round.round_date}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 text-xs text-neutral-400 shrink-0">
+                  {round.amount_raised !== null && (
+                    <span>${Math.round(round.amount_raised).toLocaleString()}</span>
+                  )}
+                  {round.pre_money_valuation !== null && (
+                    <span>Pre: ${Math.round(round.pre_money_valuation).toLocaleString()}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Regulatory Status (UK Companies House) */}
       {result.regulatoryStatus && (
         <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
@@ -465,6 +556,14 @@ export default function ScoreResult({ result }: ScoreResultProps) {
                 </span>
               </div>
             )}
+            {result.comparables.cohortStats.medianPreMoneyValuation !== null && (
+              <div>
+                <span className="text-neutral-500">Median Pre-Money: </span>
+                <span className="text-neutral-200">
+                  ${Math.round(result.comparables.cohortStats.medianPreMoneyValuation).toLocaleString()}
+                </span>
+              </div>
+            )}
             {result.comparables.cohortStats.medianRevenueAtRaise !== null && (
               <div>
                 <span className="text-neutral-500">Median Revenue: </span>
@@ -490,6 +589,51 @@ export default function ScoreResult({ result }: ScoreResultProps) {
               </span>
             </div>
           </div>
+
+          {result.comparables.valuationContext && (
+            <div className="rounded-lg border border-neutral-700/50 bg-neutral-900/40 p-4 mb-4">
+              <h4 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-2">
+                Valuation Context
+              </h4>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm mb-2">
+                <div>
+                  <span className="text-neutral-500">Implied Multiple: </span>
+                  <span className="text-neutral-200">
+                    {result.comparables.valuationContext.impliedRevenueMultiple.toFixed(1)}x
+                  </span>
+                </div>
+                <div>
+                  <span className="text-neutral-500">Cohort Median: </span>
+                  <span className="text-neutral-200">
+                    {result.comparables.valuationContext.cohortMedianMultiple.toFixed(1)}x
+                  </span>
+                </div>
+                <div>
+                  <span className="text-neutral-500">Percentile: </span>
+                  <span className="text-neutral-200">
+                    {result.comparables.valuationContext.valuationPercentile}th
+                  </span>
+                </div>
+                <div>
+                  <span className="text-neutral-500">Pricing Signal: </span>
+                  <span
+                    className={`font-medium capitalize ${
+                      result.comparables.valuationContext.signal === "aggressive"
+                        ? "text-red-400"
+                        : result.comparables.valuationContext.signal === "attractive"
+                          ? "text-green-400"
+                          : "text-yellow-400"
+                    }`}
+                  >
+                    {result.comparables.valuationContext.signal}
+                  </span>
+                </div>
+              </div>
+              <p className="text-xs text-neutral-500">
+                {result.comparables.valuationContext.note}
+              </p>
+            </div>
+          )}
 
           {/* Nearest deals */}
           {result.comparables.nearestDeals.length > 0 && (
@@ -531,6 +675,32 @@ export default function ScoreResult({ result }: ScoreResultProps) {
         </div>
       )}
 
+      {(result.documentSummary.parsed.length > 0 || result.documentSummary.warnings.length > 0) && (
+        <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+          <h3 className="text-sm font-semibold text-neutral-300 mb-3">
+            Document Ingestion
+          </h3>
+          {result.documentSummary.parsed.length > 0 && (
+            <div className="space-y-1.5 mb-3">
+              {result.documentSummary.parsed.map((doc) => (
+                <div key={`${doc.name}-${doc.mimeType}`} className="text-xs text-neutral-400">
+                  {doc.name} ({doc.mimeType}){doc.extractedChars > 0 ? ` - ${doc.extractedChars.toLocaleString()} chars` : " - analyzed as PDF"}
+                </div>
+              ))}
+            </div>
+          )}
+          {result.documentSummary.warnings.length > 0 && (
+            <div className="space-y-1">
+              {result.documentSummary.warnings.map((warning, i) => (
+                <div key={`${warning}-${i}`} className="text-xs text-amber-500">
+                  {warning}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* AI-Generated Company Profile (knowledge mode) */}
       {result.dataSource === "ai_knowledge" && result.generatedProfile && (
         <div className="bg-amber-950/20 rounded-xl p-5 border border-amber-800/30">
@@ -551,6 +721,9 @@ export default function ScoreResult({ result }: ScoreResultProps) {
         <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
           <h3 className="text-sm font-semibold text-neutral-300 mb-4">
             AI Text Analysis
+            {result.dataSource === "document" && (
+              <span className="text-xs text-neutral-500 ml-2">(from uploaded documents)</span>
+            )}
             {result.dataSource === "website" && (
               <span className="text-xs text-neutral-500 ml-2">(from website)</span>
             )}
@@ -565,6 +738,33 @@ export default function ScoreResult({ result }: ScoreResultProps) {
                 <div className="text-xs text-neutral-500 capitalize">
                   {dim.replace(/_/g, " ")}
                 </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {result.provenance && (
+        <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+          <h3 className="text-sm font-semibold text-neutral-300 mb-3">
+            Data Provenance
+          </h3>
+          {result.provenance.newestAsOfDate && (
+            <p className="text-xs text-neutral-500 mb-3">
+              Latest data timestamp: {result.provenance.newestAsOfDate}
+              {result.provenance.stale ? " (stale)" : ""}
+            </p>
+          )}
+          <div className="space-y-1.5">
+            {result.provenance.fields.map((field) => (
+              <div
+                key={`${field.feature}-${field.source}`}
+                className="flex items-center justify-between text-xs border-b border-neutral-700/30 pb-1"
+              >
+                <span className="text-neutral-300">{field.feature}</span>
+                <span className="text-neutral-500">
+                  {field.source} · {field.asOfDate} · {field.stalenessDays}d old
+                </span>
               </div>
             ))}
           </div>

@@ -10,6 +10,7 @@ type ScoreResponse = {
   confidenceRange: number;
   recommendation: {
     class: string;
+    originalClass: string;
     label: string;
     description: string;
   };
@@ -30,7 +31,7 @@ type ScoreResponse = {
     reason: string;
   }>;
   matchedCompany: string | null;
-  dataSource: "user" | "website" | "ai_knowledge" | "none";
+  dataSource: "user" | "document" | "website" | "ai_knowledge" | "none";
   generatedProfile: string | null;
   memo: {
     thesis: string;
@@ -66,12 +67,44 @@ type ScoreResponse = {
     qsbs_eligible: boolean | null;
     qualified_institutional: boolean | null;
   } | null;
+  fundingHistory: Array<{
+    id: string;
+    instrument_type: string | null;
+    round_type: string | null;
+    amount_raised: number | null;
+    pre_money_valuation: number | null;
+    platform: string | null;
+    round_date: string | null;
+    overfunding_ratio: number | null;
+    investor_count: number | null;
+    funding_velocity_days: number | null;
+    eis_seis_eligible: boolean | null;
+    qsbs_eligible: boolean | null;
+    qualified_institutional: boolean | null;
+  }>;
+  assessmentWarning: string | null;
+  documentSummary: {
+    parsed: Array<{ name: string; mimeType: string; extractedChars: number }>;
+    warnings: string[];
+  };
+  provenance: {
+    newestAsOfDate: string | null;
+    stale: boolean;
+    fields: Array<{
+      feature: string;
+      source: string;
+      asOfDate: string;
+      stalenessDays: number;
+    }>;
+  } | null;
   comparables: {
     cohortStats: {
       sampleSize: number;
       failureRate: number;
       survivalRate: number;
       exitRate: number;
+      medianPreMoneyValuation: number | null;
+      medianRevenueMultiple: number | null;
       medianFundingTarget: number | null;
       medianRevenueAtRaise: number | null;
       medianCompanyAgeMonths: number | null;
@@ -80,6 +113,13 @@ type ScoreResponse = {
       pctPreRevenue: number;
     };
     cohortLabel: string;
+    valuationContext: {
+      valuationPercentile: number;
+      impliedRevenueMultiple: number;
+      cohortMedianMultiple: number;
+      signal: "attractive" | "fair" | "aggressive";
+      note: string;
+    } | null;
     nearestDeals: Array<{
       name: string;
       sector: string | null;
@@ -106,6 +146,12 @@ export default function Home() {
     revenue: number | undefined;
     fundingTarget: number | undefined;
     pitchText: string;
+    documents: Array<{
+      name: string;
+      mimeType: string;
+      contentBase64: string;
+      sizeBytes: number;
+    }>;
   }) => {
     setIsLoading(true);
     setError(null);
@@ -160,8 +206,8 @@ export default function Home() {
               Score a Company
             </h2>
             <p className="text-sm text-neutral-500 mb-6">
-              Enter company details for an AI-powered investment quality
-              assessment. Add pitch text for deeper analysis.
+              Enter company name, website, and sector for a fast analyst-style
+              assessment. Expand optional inputs for deeper diligence.
             </p>
             <ScoreForm onSubmit={handleSubmit} isLoading={isLoading} />
           </div>
