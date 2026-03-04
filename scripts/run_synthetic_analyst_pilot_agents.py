@@ -80,6 +80,8 @@ class AgentDecision:
     data_gaps: list[str]
     raw_response: dict[str, Any]
     model_recommendation: str | None = None
+    is_fallback: bool = False
+    fallback_reason: str = ""
 
 
 @dataclass
@@ -481,6 +483,11 @@ def _load_cycle_items_by_ids(
 
 def _upsert_decision(conn, run_id: str, decision: AgentDecision) -> None:
     """Idempotent upsert on (run_id, shadow_cycle_item_id, analyst_profile)."""
+    # Merge fallback metadata into raw_response for audit trail
+    raw = dict(decision.raw_response)
+    raw["is_fallback"] = decision.is_fallback
+    raw["fallback_reason"] = decision.fallback_reason
+
     execute_query(
         conn,
         """
@@ -512,7 +519,7 @@ def _upsert_decision(conn, run_id: str, decision: AgentDecision) -> None:
             decision.rationale,
             json.dumps(decision.key_risks, default=_json_default),
             json.dumps(decision.data_gaps, default=_json_default),
-            json.dumps(decision.raw_response, default=_json_default),
+            json.dumps(raw, default=_json_default),
         ),
     )
 
@@ -526,6 +533,9 @@ async def _ask_persona_async(
     client: anthropic.AsyncAnthropic,
     persona: dict[str, str],
     context: dict[str, Any],
+    *,
+    strict_no_fallback: bool = False,
+    temperature: float = 0.2,
 ) -> dict[str, Any]:
     """Call Claude API for a single persona + deal.  1 retry on malformed JSON."""
     system = (
@@ -556,7 +566,7 @@ async def _ask_persona_async(
             msg = await client.messages.create(
                 model=MODEL,
                 max_tokens=500,
-                temperature=0.2,
+                temperature=temperature,
                 system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
@@ -584,7 +594,10 @@ async def _ask_persona_async(
         conviction = 0
     conviction = max(0, min(100, conviction))
 
-    if rec == "abstain" and _has_actionable_context(context):
+    is_fallback = False
+    fallback_reason = ""
+
+    if rec == "abstain" and _has_actionable_context(context) and not strict_no_fallback:
         fallback_rec, fallback_conviction = _persona_fallback_from_context(
             persona["id"], context
         )
@@ -592,6 +605,8 @@ async def _ask_persona_async(
         if conviction == 0:
             conviction = fallback_conviction
         parsed["fallback_from_abstain"] = True
+        is_fallback = True
+        fallback_reason = "abstain_with_actionable_context"
 
     return {
         "recommendation_class": rec,
@@ -600,6 +615,8 @@ async def _ask_persona_async(
         "key_risks": parsed.get("key_risks") or [],
         "data_gaps": parsed.get("data_gaps") or [],
         "raw": parsed,
+        "is_fallback": is_fallback,
+        "fallback_reason": fallback_reason,
     }
 
 
@@ -607,6 +624,9 @@ async def _run_agent(
     client: anthropic.AsyncAnthropic,
     agent_state: AgentState,
     items: list[dict[str, Any]],
+    *,
+    strict_no_fallback: bool = False,
+    temperature: float = 0.2,
 ) -> None:
     """Run a single agent across all deals.  Mutates only its own AgentState."""
     persona = agent_state.profile
@@ -614,7 +634,13 @@ async def _run_agent(
     for item in items:
         context = _build_context(item)
         try:
-            result = await _ask_persona_async(client, persona, context)
+            result = await _ask_persona_async(
+                client,
+                persona,
+                context,
+                strict_no_fallback=strict_no_fallback,
+                temperature=temperature,
+            )
         except Exception as exc:
             logger.warning(
                 "agent_persona_failed",
@@ -629,6 +655,8 @@ async def _run_agent(
                 "key_risks": ["persona_scoring_error"],
                 "data_gaps": ["claude_response_unavailable"],
                 "raw": {"error": str(exc)},
+                "is_fallback": False,
+                "fallback_reason": "api_error",
             }
             agent_state.errors += 1
 
@@ -644,6 +672,8 @@ async def _run_agent(
                 data_gaps=result["data_gaps"],
                 raw_response=result["raw"],
                 model_recommendation=item.get("model_recommendation"),
+                is_fallback=result.get("is_fallback", False),
+                fallback_reason=result.get("fallback_reason", ""),
             )
         )
 
@@ -651,6 +681,9 @@ async def _run_agent(
 async def _fan_out_agents(
     api_key: str,
     items: list[dict[str, Any]],
+    *,
+    strict_no_fallback: bool = False,
+    temperature: float = 0.2,
 ) -> list[AgentState]:
     """Launch 3 independent agent workers in parallel, return their states."""
     # Each agent gets its OWN async client instance and state object.
@@ -661,7 +694,17 @@ async def _fan_out_agents(
         state = AgentState(profile=profile)
         agents.append(state)
         client = anthropic.AsyncAnthropic(api_key=api_key, max_retries=2)
-        tasks.append(asyncio.create_task(_run_agent(client, state, items)))
+        tasks.append(
+            asyncio.create_task(
+                _run_agent(
+                    client,
+                    state,
+                    items,
+                    strict_no_fallback=strict_no_fallback,
+                    temperature=temperature,
+                )
+            )
+        )
 
     await asyncio.gather(*tasks)
     return agents
@@ -714,6 +757,21 @@ def _aggregate(
     total_decisions = len(all_decisions)
     total_errors = sum(s.errors for s in agent_states)
 
+    # Fallback metrics
+    fallback_count = sum(1 for d in all_decisions if d.is_fallback)
+    non_fallback_count = total_decisions - fallback_count
+    fallback_rate = round(fallback_count / total_decisions, 4) if total_decisions else 0.0
+    non_fallback_rate = round(non_fallback_count / total_decisions, 4) if total_decisions else 0.0
+
+    # Model alignment coverage: fraction of items with a non-null model recommendation
+    items_with_model = sum(
+        1 for item_id, decs in by_item.items()
+        if any(d.model_recommendation for d in decs)
+    )
+    model_alignment_coverage = (
+        round(items_with_model / total_items, 4) if total_items else 0.0
+    )
+
     return {
         "runName": run_name,
         "cycleId": cycle["id"],
@@ -730,6 +788,10 @@ def _aggregate(
             if model_alignment_checks
             else None
         ),
+        "fallbackRate": fallback_rate,
+        "nonFallbackRate": non_fallback_rate,
+        "nonFallbackDecisionCount": non_fallback_count,
+        "modelAlignmentCoverage": model_alignment_coverage,
         "executionMode": "parallel_async_agents",
         "agentCount": len(agent_states),
         "generatedAt": datetime.now(UTC).isoformat(),
@@ -799,6 +861,10 @@ def main(
     item_ids_file: str | None = typer.Option(
         None, help="Path to file with one shadow_cycle_item_id per line (locks item set)."
     ),
+    strict_no_fallback: bool = typer.Option(
+        False, help="Disable abstain-to-fallback mapping; keep abstain as-is."
+    ),
+    temperature: float = typer.Option(0.2, help="LLM sampling temperature."),
 ) -> None:
     settings = get_settings()
     if not settings.anthropic_api_key:
@@ -866,7 +932,12 @@ def main(
 
         # Fan out 3 agents in parallel
         agent_states = asyncio.run(
-            _fan_out_agents(settings.anthropic_api_key, items)
+            _fan_out_agents(
+                settings.anthropic_api_key,
+                items,
+                strict_no_fallback=strict_no_fallback,
+                temperature=temperature,
+            )
         )
 
         # Persist all decisions (idempotent upsert)
@@ -900,6 +971,9 @@ def main(
             errors=summary["totalErrors"],
             disagreement_rate=summary["disagreementRate"],
             model_alignment_rate=summary["modelMajorityAlignmentRate"],
+            fallback_rate=summary["fallbackRate"],
+            non_fallback_rate=summary["nonFallbackRate"],
+            model_alignment_coverage=summary["modelAlignmentCoverage"],
             report_json=str(json_path),
             report_md=str(md_path),
         )
