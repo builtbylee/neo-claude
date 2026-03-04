@@ -632,6 +632,29 @@ def _cycle_items_query(
             (
               SELECT c.id
               FROM companies c
+              LEFT JOIN LATERAL (
+                SELECT
+                  co.amount_raised,
+                  co.had_revenue,
+                  co.revenue_at_raise
+                FROM crowdfunding_outcomes co
+                WHERE co.company_id = c.id
+                ORDER BY co.campaign_date DESC NULLS LAST
+                LIMIT 1
+              ) co_sig ON true
+              LEFT JOIN LATERAL (
+                SELECT fr.amount_raised
+                FROM funding_rounds fr
+                WHERE fr.company_id = c.id
+                ORDER BY fr.round_date DESC NULLS LAST
+                LIMIT 1
+              ) fr_sig ON true
+              LEFT JOIN LATERAL (
+                SELECT 1 AS has_text
+                FROM sec_form_c_texts sft
+                WHERE sft.company_id = c.id
+                LIMIT 1
+              ) tx_sig ON true
               WHERE (
                 (b.entity_id IS NOT NULL AND c.entity_id = b.entity_id)
                 OR lower(c.name) = lower(b.company_name)
@@ -642,6 +665,15 @@ def _cycle_items_query(
                 )
               )
               ORDER BY
+                CASE
+                  WHEN COALESCE(co_sig.amount_raised, fr_sig.amount_raised) IS NOT NULL THEN 0
+                  ELSE 1
+                END,
+                CASE
+                  WHEN co_sig.had_revenue IS NOT NULL OR co_sig.revenue_at_raise IS NOT NULL THEN 0
+                  ELSE 1
+                END,
+                CASE WHEN tx_sig.has_text = 1 THEN 0 ELSE 1 END,
                 CASE c.source
                   WHEN 'sec_dera_cf' THEN 0
                   WHEN 'sec_form_d' THEN 1
@@ -706,6 +738,7 @@ def _cycle_items_query(
           SELECT
             ec.id AS item_id,
             co.platform AS cf_platform,
+            co.sector AS campaign_sector,
             co.campaign_date,
             co.funding_target,
             co.amount_raised,
@@ -760,6 +793,7 @@ def _cycle_items_query(
           SELECT
             ec.id AS item_id,
             fd.period_end_date AS financial_period_end_date,
+            fd.revenue AS financial_revenue,
             fd.revenue_growth_yoy,
             fd.employee_count,
             fd.burn_rate_monthly,
@@ -828,12 +862,19 @@ def _cycle_items_query(
             ORDER BY tfw.as_of_date DESC
             LIMIT 1
           ) tfw ON true
+        ),
+        company_meta AS (
+          SELECT
+            ec.id AS item_id,
+            c.sector AS company_sector
+          FROM enrichment_company ec
+          LEFT JOIN companies c ON c.id = ec.company_id
         )
         SELECT
           ec.id::text AS shadow_cycle_item_id,
           ec.entity_id::text AS entity_id,
           ec.company_name,
-          ec.sector,
+          COALESCE(ec.sector, ca.campaign_sector, cm.company_sector) AS sector,
           ec.country,
           ec.source,
           ec.source_ref,
@@ -848,14 +889,21 @@ def _cycle_items_query(
           COALESCE(ed.return_distribution, le.return_distribution) AS return_distribution,
           ca.cf_platform,
           ca.campaign_date,
-          ca.funding_target,
-          ca.amount_raised,
+          COALESCE(ca.funding_target, ro.round_amount_raised) AS funding_target,
+          COALESCE(ca.amount_raised, ro.round_amount_raised) AS amount_raised,
           ca.overfunding_ratio,
-          ca.pre_money_valuation,
+          COALESCE(ca.pre_money_valuation, ro.round_pre_money_valuation) AS pre_money_valuation,
           ca.equity_offered,
-          ca.cf_investor_count,
-          ca.had_revenue,
-          ca.revenue_at_raise,
+          COALESCE(ca.cf_investor_count, ro.round_investor_count) AS cf_investor_count,
+          COALESCE(
+            ca.had_revenue,
+            CASE
+              WHEN ca.revenue_at_raise IS NOT NULL THEN ca.revenue_at_raise > 0
+              WHEN fin.financial_revenue IS NOT NULL THEN fin.financial_revenue > 0
+              ELSE NULL
+            END
+          ) AS had_revenue,
+          COALESCE(ca.revenue_at_raise, fin.financial_revenue) AS revenue_at_raise,
           ca.founder_count,
           ca.company_age_at_raise_months,
           ca.stage_bucket,
@@ -896,6 +944,7 @@ def _cycle_items_query(
         LEFT JOIN financial fin ON fin.item_id = ec.id
         LEFT JOIN text_profile tp ON tp.item_id = ec.id
         LEFT JOIN feature_latest fl ON fl.item_id = ec.id
+        LEFT JOIN company_meta cm ON cm.item_id = ec.id
         ORDER BY (COALESCE(ed.eval_id, le.eval_id) IS NULL) ASC, ec.created_at ASC
         {limit_sql}
     """

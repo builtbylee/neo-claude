@@ -93,6 +93,7 @@ def _get_texts_to_score(
     prompt_version: str,
     *,
     limit: int | None = None,
+    company_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Get form_c_texts that haven't been scored yet."""
     from startuplens.db import execute_query
@@ -108,12 +109,18 @@ def _get_texts_to_score(
         LEFT JOIN claude_text_scores s
             ON s.company_id = t.company_id AND s.prompt_version = %s
         WHERE s.id IS NULL
+    """
+    params: list[Any] = [prompt_version]
+    if company_ids:
+        query += "\n          AND t.company_id = ANY(%s::uuid[])"
+        params.append(company_ids)
+    query += """
         ORDER BY t.company_id, t.created_at ASC
     """
     if limit:
         query += f"\n        LIMIT {int(limit)}"
 
-    return execute_query(conn, query, (prompt_version,))
+    return execute_query(conn, query, tuple(params))
 
 
 def score_batch(
@@ -122,6 +129,7 @@ def score_batch(
     *,
     limit: int | None = None,
     max_concurrent: int = 5,
+    company_ids: list[str] | None = None,
 ) -> int:
     """Score unscored texts using Claude with batched async calls.
 
@@ -135,7 +143,12 @@ def score_batch(
         )
         return 0
 
-    texts = _get_texts_to_score(conn, PROMPT_VERSION, limit=limit)
+    texts = _get_texts_to_score(
+        conn,
+        PROMPT_VERSION,
+        limit=limit,
+        company_ids=company_ids,
+    )
     logger.info("score_targets", count=len(texts))
 
     if not texts:
@@ -327,7 +340,11 @@ def _store_scores(
 # ---------------------------------------------------------------------------
 
 
-def run_text_scorer(*, limit: int | None = None) -> int:
+def run_text_scorer(
+    *,
+    limit: int | None = None,
+    company_ids: list[str] | None = None,
+) -> int:
     """Run the text scoring pipeline. Returns count of texts scored."""
     from startuplens.config import get_settings
     from startuplens.db import get_connection
@@ -335,6 +352,6 @@ def run_text_scorer(*, limit: int | None = None) -> int:
     settings = get_settings()
     conn = get_connection(settings)
     try:
-        return score_batch(conn, settings, limit=limit)
+        return score_batch(conn, settings, limit=limit, company_ids=company_ids)
     finally:
         conn.close()

@@ -491,6 +491,8 @@ def generate_profiles_from_db(
     conn: psycopg.Connection,
     *,
     limit: int | None = None,
+    include_unknown_outcomes: bool = False,
+    company_ids: list[str] | None = None,
 ) -> int:
     """Generate company profile texts from structured DB data.
 
@@ -502,6 +504,7 @@ def generate_profiles_from_db(
     """
     from startuplens.db import execute_query
 
+    params: list[Any] = []
     query = """
         SELECT
             c.id AS company_id,
@@ -540,24 +543,33 @@ def generate_profiles_from_db(
         ) fd ON true
         LEFT JOIN sec_form_c_texts t ON t.company_id = c.id
         WHERE c.source IN ('sec_dera_cf', 'sec_edgar')
+          AND t.id IS NULL
+    """
+    if not include_unknown_outcomes:
+        query += """
           AND co.outcome IN ('trading', 'exited', 'failed')
           AND co.label_quality_tier <= 2
-          AND t.id IS NULL
+        """
+    if company_ids:
+        query += "\n          AND c.id = ANY(%s::uuid[])"
+        params.append(company_ids)
+    query += """
         ORDER BY c.id
     """
     if limit:
         query += f"\n        LIMIT {int(limit)}"
 
-    rows = execute_query(conn, query)
+    rows = execute_query(conn, query, tuple(params))
     logger.info("profile_generation_targets", count=len(rows))
 
     if not rows:
         return 0
 
     generated = 0
+    min_profile_len = 40 if include_unknown_outcomes else _MIN_TEXT_LENGTH
     for row in rows:
         profile = _build_profile_text(row)
-        if len(profile) >= _MIN_TEXT_LENGTH:
+        if len(profile) >= min_profile_len:
             _store_text(
                 conn,
                 row["company_id"],
@@ -645,12 +657,22 @@ def run_text_scraper(*, limit: int | None = None) -> int:
         conn.close()
 
 
-def run_profile_generator(*, limit: int | None = None) -> int:
+def run_profile_generator(
+    *,
+    limit: int | None = None,
+    include_unknown_outcomes: bool = False,
+    company_ids: list[str] | None = None,
+) -> int:
     """Generate profiles from DB data. Returns count generated."""
     from startuplens.db import get_connection
 
     conn = get_connection()
     try:
-        return generate_profiles_from_db(conn, limit=limit)
+        return generate_profiles_from_db(
+            conn,
+            limit=limit,
+            include_unknown_outcomes=include_unknown_outcomes,
+            company_ids=company_ids,
+        )
     finally:
         conn.close()
