@@ -21,8 +21,11 @@ def _decision(
     rec: str,
     conviction: int = 50,
     is_fallback: bool = False,
+    model_recommendation: str | None = None,
 ) -> dict:
     raw = {"is_fallback": is_fallback, "fallback_reason": ""}
+    if model_recommendation is not None:
+        raw["model_recommendation"] = model_recommendation
     return {
         "run_id": run_id,
         "run_name": run_name,
@@ -32,6 +35,7 @@ def _decision(
         "recommendation_class": rec,
         "conviction": conviction,
         "raw_response": raw,
+        "model_recommendation": model_recommendation,
     }
 
 
@@ -146,6 +150,28 @@ class TestComputeStability:
         result = _compute_stability(self._ids(), self._names(), decisions)
         assert result["modelAlignmentCoverage"] == 0.0
         assert result["gates"]["G5_model_alignment_coverage_ge_30pct"]["pass"] is False
+
+    def test_model_alignment_coverage_non_zero(self) -> None:
+        """Coverage is computed from model recommendation presence."""
+        decisions = []
+        for rid, rn in zip(self._ids(), self._names()):
+            for agent in ["conservative", "balanced", "aggressive"]:
+                decisions.append(
+                    _decision(
+                        rid,
+                        rn,
+                        "item-a",
+                        "A",
+                        agent,
+                        "watch",
+                        model_recommendation="watch",
+                    )
+                )
+                decisions.append(_decision(rid, rn, "item-b", "B", agent, "watch"))
+
+        result = _compute_stability(self._ids(), self._names(), decisions)
+        assert result["modelAlignmentCoverage"] == 0.5
+        assert result["gates"]["G5_model_alignment_coverage_ge_30pct"]["pass"] is True
 
     def test_per_agent_fallback_rate(self) -> None:
         decisions = []

@@ -19,9 +19,12 @@ from run_synthetic_analyst_pilot_agents import (  # noqa: E402
     AgentState,
     _aggregate,
     _ask_persona_async,
+    _compute_data_sufficiency,
     _fan_out_agents,
     _load_cycle_items_by_ids,
     _parse_json_response,
+    _seed_recommendation_class,
+    _select_pilot_items,
     _upsert_decision,
 )
 
@@ -483,3 +486,79 @@ class TestLoadCycleItemsByIds:
         _load_cycle_items_by_ids(conn, "cycle-1", ["id-x"])
         query = cursor.execute.call_args[0][0]
         assert "IN (" in query
+
+
+class TestDataSufficiencyAndSelection:
+    def test_data_sufficiency_flags_missing_contract_fields(self) -> None:
+        item = {
+            "company_name": "SparseCo",
+            "country": "US",
+            "campaign_date": None,
+            "stage_bucket": "seed",
+            "amount_raised": None,
+            "funding_target": None,
+            "had_revenue": None,
+            "revenue_at_raise": None,
+            "founder_count": None,
+            "employee_count": None,
+            "cf_investor_count": None,
+            "narrative_excerpt": None,
+            "text_quality_score": None,
+        }
+        suff = _compute_data_sufficiency(item)
+        assert suff["score"] < 45
+        assert "campaign_date" in suff["missing_required_fields"]
+        assert "narrative_or_text_score" in suff["missing_required_fields"]
+
+    def test_seed_recommendation_class_abstains_on_weak_data(self) -> None:
+        item = {
+            "company_name": "WeakData Inc",
+            "stage_bucket": "seed",
+            "data_sufficiency": {
+                "score": 20,
+                "category_count": 1,
+                "categories": {},
+                "missing_required_fields": ["campaign_date"],
+            },
+        }
+        assert _seed_recommendation_class(item) == "abstain"
+
+    def test_select_pilot_items_preserves_model_coverage_and_diversity(self) -> None:
+        items = [
+            {
+                "shadow_cycle_item_id": "i1",
+                "company_name": "A",
+                "model_recommendation": "watch",
+                "data_sufficiency": {"score": 90, "category_count": 5},
+            },
+            {
+                "shadow_cycle_item_id": "i2",
+                "company_name": "B",
+                "model_recommendation": "deep_diligence",
+                "data_sufficiency": {"score": 88, "category_count": 5},
+            },
+            {
+                "shadow_cycle_item_id": "i3",
+                "company_name": "C",
+                "model_recommendation": None,
+                "data_sufficiency": {"score": 87, "category_count": 5},
+                "had_revenue": False,
+            },
+            {
+                "shadow_cycle_item_id": "i4",
+                "company_name": "D",
+                "model_recommendation": None,
+                "data_sufficiency": {"score": 86, "category_count": 5},
+                "had_revenue": True,
+                "revenue_at_raise": 900000,
+            },
+        ]
+        selected = _select_pilot_items(
+            items,
+            max_items=4,
+            min_class_coverage=2,
+            min_model_coverage=0.5,
+        )
+        assert len(selected) == 4
+        model_count = sum(1 for i in selected if i.get("model_recommendation"))
+        assert model_count >= 2

@@ -47,10 +47,27 @@ def _load_decisions(conn, run_ids: list[str]) -> list[dict[str, Any]]:
           d.analyst_profile,
           d.recommendation_class,
           d.conviction::integer AS conviction,
-          d.raw_response
+          d.raw_response,
+          COALESCE(
+            d.raw_response ->> 'model_recommendation',
+            se.recommendation_class,
+            le.recommendation_class
+          ) AS model_recommendation
         FROM synthetic_pilot_decisions d
         JOIN synthetic_pilot_runs r ON r.id = d.run_id
         JOIN shadow_cycle_items sci ON sci.id = d.shadow_cycle_item_id
+        LEFT JOIN evaluations se ON se.id = sci.evaluation_id
+        LEFT JOIN LATERAL (
+          SELECT e.recommendation_class
+          FROM evaluations e
+          WHERE
+            (sci.entity_id IS NOT NULL AND e.entity_id = sci.entity_id)
+            OR lower(e.company_name) = lower(sci.company_name)
+          ORDER BY
+            CASE WHEN sci.entity_id IS NOT NULL AND e.entity_id = sci.entity_id THEN 0 ELSE 1 END,
+            e.created_at DESC
+          LIMIT 1
+        ) le ON true
         WHERE d.run_id IN ({placeholders})
         ORDER BY d.shadow_cycle_item_id, d.analyst_profile, r.started_at
         """,
@@ -266,10 +283,23 @@ def _compute_stability(
         conviction_drift[agent] = agent_stats
 
     # ---- Model alignment coverage ----
-    # Check run summaries for modelAlignmentCoverage; if not available, query DB
-    # The decisions table doesn't store model_recommendation directly.
-    # Use the run summary (stored in synthetic_pilot_runs.summary) or default to 0.
-    model_alignment_coverage = 0.0
+    items_with_model = 0
+    for iid in item_ids:
+        has_model = False
+        for rid in run_ids:
+            for agent in agents:
+                d = idx.get((iid, agent, rid))
+                if d and str(d.get("model_recommendation") or "").strip():
+                    has_model = True
+                    break
+            if has_model:
+                break
+        if has_model:
+            items_with_model += 1
+
+    model_alignment_coverage = (
+        round(items_with_model / len(item_ids), 4) if item_ids else 0.0
+    )
 
     # ---- Class coverage count ----
     class_coverage_count = len(all_classes)
@@ -314,8 +344,7 @@ def _compute_stability(
         )
     if not g5_pass:
         gate_failures.append(
-            f"G5 FAIL: model_alignment_coverage {model_alignment_coverage:.2%} < 30% "
-            f"(0 evaluations in DB)"
+            f"G5 FAIL: model_alignment_coverage {model_alignment_coverage:.2%} < 30%"
         )
     if not g6_pass:
         gate_failures.append(

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -32,6 +33,11 @@ app = typer.Typer()
 MODEL = "claude-haiku-4-5-20251001"
 
 RECOMMENDATIONS = {"invest", "deep_diligence", "watch", "pass", "abstain"}
+SEED_EVAL_NOTE = "seeded_shadow_model_eval_v2"
+DEFAULT_MIN_SUFFICIENCY_SCORE = 50.0
+DEFAULT_MIN_CATEGORY_COUNT = 3
+DEFAULT_MIN_MODEL_COVERAGE = 0.30
+DEFAULT_MIN_CLASS_COVERAGE = 3
 
 AGENT_PROFILES: list[dict[str, str]] = [
     {
@@ -129,24 +135,143 @@ def _parse_json_response(text: str) -> dict[str, Any]:
     return parsed
 
 
-def _has_actionable_context(context: dict[str, Any]) -> bool:
-    company = context.get("company", {})
-    model_output = context.get("model_output", {})
-    deal = context.get("deal_snapshot", {})
-    latest_round = deal.get("latest_round", {})
+def _has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict)):
+        return len(value) > 0
+    return True
 
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_data_sufficiency(item: dict[str, Any]) -> dict[str, Any]:
+    """Compute evidence-quality score and missing contract fields."""
+    identity_fields = {
+        "company_name": _has_value(item.get("company_name")),
+        "country": _has_value(item.get("country")),
+        "campaign_date": _has_value(item.get("campaign_date")),
+        "stage_bucket": _has_value(item.get("stage_bucket")),
+    }
+    financial_fields = {
+        "had_revenue": _has_value(item.get("had_revenue")),
+        "revenue_at_raise": _has_value(item.get("revenue_at_raise")),
+        "revenue_growth_yoy": _has_value(item.get("revenue_growth_yoy")),
+        "total_assets": _has_value(item.get("total_assets")),
+        "total_debt": _has_value(item.get("total_debt")),
+        "burn_rate_monthly": _has_value(item.get("burn_rate_monthly")),
+    }
+    terms_fields = {
+        "funding_target": _has_value(item.get("funding_target")),
+        "amount_raised": _has_value(item.get("amount_raised")),
+        "pre_money_valuation": _has_value(item.get("pre_money_valuation")),
+        "equity_offered": _has_value(item.get("equity_offered")),
+        "instrument_type": _has_value(item.get("instrument_type")),
+    }
+    team_traction_fields = {
+        "founder_count": _has_value(item.get("founder_count")),
+        "employee_count": _has_value(item.get("employee_count")),
+        "investor_count": _has_value(item.get("cf_investor_count")),
+        "company_age_months": _has_value(item.get("company_age_at_raise_months")),
+    }
+    narrative_fields = {
+        "text_quality_score": _has_value(item.get("text_quality_score")),
+        "narrative_excerpt": _has_value(item.get("narrative_excerpt")),
+    }
+
+    def _category_score(field_map: dict[str, bool], weight: int) -> tuple[int, int]:
+        present = sum(1 for v in field_map.values() if v)
+        total = len(field_map)
+        if total == 0:
+            return 0, 0
+        scaled = int(round((present / total) * weight))
+        return scaled, present
+
+    identity_score, identity_present = _category_score(identity_fields, 20)
+    financial_score, financial_present = _category_score(financial_fields, 20)
+    terms_score, terms_present = _category_score(terms_fields, 20)
+    team_score, team_present = _category_score(team_traction_fields, 20)
+    narrative_score, narrative_present = _category_score(narrative_fields, 20)
+
+    quality_bonus = 0
+    if _safe_float(item.get("field_completeness_ratio")) is not None:
+        quality_bonus += min(
+            10,
+            int(round((_safe_float(item.get("field_completeness_ratio")) or 0.0) * 10)),
+        )
+    elif _safe_float(item.get("data_source_count")) is not None:
+        quality_bonus += min(10, int(_safe_float(item.get("data_source_count")) or 0))
+
+    total_score = min(
+        100,
+        identity_score
+        + financial_score
+        + terms_score
+        + team_score
+        + narrative_score
+        + quality_bonus,
+    )
+
+    required_contract_fields = {
+        "campaign_date": _has_value(item.get("campaign_date")),
+        "amount_or_target": _has_value(item.get("amount_raised"))
+        or _has_value(item.get("funding_target")),
+        "revenue_or_flag": _has_value(item.get("revenue_at_raise"))
+        or _has_value(item.get("had_revenue")),
+        "team_or_traction": _has_value(item.get("founder_count"))
+        or _has_value(item.get("employee_count"))
+        or _has_value(item.get("cf_investor_count")),
+        "narrative_or_text_score": _has_value(item.get("narrative_excerpt"))
+        or _has_value(item.get("text_quality_score")),
+    }
+    missing_required = [k for k, ok in required_contract_fields.items() if not ok]
+
+    categories = {
+        "identity": identity_score,
+        "financial": financial_score,
+        "terms": terms_score,
+        "team_traction": team_score,
+        "narrative": narrative_score,
+    }
+    category_count = sum(1 for s in categories.values() if s >= 10)
+
+    source_map = {
+        "campaign_source": item.get("cf_data_source"),
+        "campaign_as_of": item.get("campaign_date"),
+        "financial_source": item.get("financial_source"),
+        "financial_as_of": item.get("financial_period_end_date"),
+        "text_source": item.get("text_source"),
+        "text_as_of": item.get("text_filing_date"),
+        "feature_as_of": item.get("feature_as_of_date"),
+    }
+
+    return {
+        "score": total_score,
+        "category_count": category_count,
+        "categories": categories,
+        "missing_required_fields": missing_required,
+        "source_map": source_map,
+    }
+
+
+def _has_actionable_context(context: dict[str, Any]) -> bool:
+    model_output = context.get("model_output", {})
     if model_output.get("score") is not None:
         return True
-    numeric_fields = [
-        deal.get("funding_target"),
-        deal.get("amount_raised"),
-        deal.get("pre_money_valuation"),
-        latest_round.get("amount_raised"),
-        latest_round.get("pre_money_valuation"),
-    ]
-    has_numeric = any(v not in (None, 0, 0.0, "") for v in numeric_fields)
-    has_categorical = bool(company.get("sector")) or bool(deal.get("stage_bucket"))
-    return has_numeric or has_categorical
+    suff = context.get("data_sufficiency") or {}
+    return (
+        (_safe_float(suff.get("score")) or 0.0) >= 45.0
+        and int(suff.get("category_count") or 0) >= 2
+    )
 
 
 def _persona_fallback_from_context(
@@ -192,6 +317,7 @@ def _persona_fallback_from_context(
 
 
 def _build_context(item: dict[str, Any]) -> dict[str, Any]:
+    suff = item.get("data_sufficiency") or _compute_data_sufficiency(item)
     return {
         "company": {
             "name": item.get("company_name"),
@@ -209,17 +335,39 @@ def _build_context(item: dict[str, Any]) -> dict[str, Any]:
             "valuation_analysis": item.get("valuation_analysis") or {},
             "return_distribution": item.get("return_distribution") or {},
         },
+        "data_sufficiency": {
+            "score": suff.get("score"),
+            "category_count": suff.get("category_count"),
+            "category_breakdown": suff.get("categories") or {},
+            "missing_required_fields": suff.get("missing_required_fields") or [],
+        },
+        "provenance": suff.get("source_map") or {},
         "deal_snapshot": {
             "platform": item.get("cf_platform"),
             "campaign_date": item.get("campaign_date"),
             "funding_target": item.get("funding_target"),
             "amount_raised": item.get("amount_raised"),
             "pre_money_valuation": item.get("pre_money_valuation"),
+            "overfunding_ratio": item.get("overfunding_ratio"),
             "equity_offered": item.get("equity_offered"),
             "investor_count": item.get("cf_investor_count"),
             "had_revenue": item.get("had_revenue"),
             "revenue_at_raise": item.get("revenue_at_raise"),
+            "founder_count": item.get("founder_count"),
+            "company_age_months": item.get("company_age_at_raise_months"),
             "stage_bucket": item.get("stage_bucket"),
+            "financials": {
+                "as_of_date": item.get("financial_period_end_date"),
+                "revenue_growth_yoy": item.get("revenue_growth_yoy"),
+                "employee_count": item.get("employee_count"),
+                "burn_rate_monthly": item.get("burn_rate_monthly"),
+                "total_assets": item.get("total_assets"),
+                "total_debt": item.get("total_debt"),
+            },
+            "narrative": {
+                "text_quality_score": item.get("text_quality_score"),
+                "excerpt": item.get("narrative_excerpt"),
+            },
             "latest_round": {
                 "date": item.get("round_date"),
                 "type": item.get("round_type"),
@@ -233,6 +381,153 @@ def _build_context(item: dict[str, Any]) -> dict[str, Any]:
             },
         },
     }
+
+
+def _heuristic_seed_score(item: dict[str, Any]) -> float:
+    """Deterministic seed score for model-alignment coverage on sparse cycles."""
+    suff = item.get("data_sufficiency") or _compute_data_sufficiency(item)
+    score = 35.0 + (float(suff.get("score") or 0.0) - 50.0) * 0.35
+
+    had_revenue = item.get("had_revenue")
+    revenue = _safe_float(item.get("revenue_at_raise"))
+    valuation = _safe_float(item.get("pre_money_valuation"))
+    overfunding = _safe_float(item.get("overfunding_ratio"))
+    rev_growth = _safe_float(item.get("revenue_growth_yoy"))
+    institutional = bool(item.get("qualified_institutional"))
+    disq_count = _safe_float(item.get("director_disqualifications")) or 0.0
+    overdue = bool(item.get("accounts_overdue"))
+
+    if had_revenue is True:
+        score += 10.0
+    elif had_revenue is False:
+        score -= 8.0
+
+    if revenue is not None and revenue > 0:
+        score += 6.0
+    if rev_growth is not None:
+        if rev_growth > 0.25:
+            score += 6.0
+        elif rev_growth < -0.10:
+            score -= 6.0
+
+    if institutional:
+        score += 10.0
+    if overfunding is not None and overfunding > 1.15:
+        score += 5.0
+
+    if valuation is not None and revenue is not None and revenue > 0:
+        multiple = valuation / revenue
+        if multiple > 40:
+            score -= 12.0
+        elif multiple > 25:
+            score -= 8.0
+        elif multiple < 8:
+            score += 3.0
+
+    if disq_count > 0:
+        score -= 25.0
+    if overdue:
+        score -= 12.0
+
+    return max(0.0, min(100.0, round(score, 2)))
+
+
+def _seed_recommendation_class(item: dict[str, Any]) -> str:
+    suff = item.get("data_sufficiency") or _compute_data_sufficiency(item)
+    suff_score = float(suff.get("score") or 0.0)
+    if suff_score < 45 or int(suff.get("category_count") or 0) < 2:
+        return "abstain"
+    score = _heuristic_seed_score(item)
+    if score >= 72:
+        return "invest"
+    if score >= 58:
+        return "deep_diligence"
+    if score >= 42:
+        return "watch"
+    return "pass"
+
+
+def _inferred_recommendation_class(item: dict[str, Any]) -> str:
+    rec = (item.get("model_recommendation") or "").strip().lower()
+    if rec in RECOMMENDATIONS:
+        return rec
+    return _seed_recommendation_class(item)
+
+
+def _missing_field_histogram(items: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    counts: Counter[str] = Counter()
+    for item in items:
+        suff = item.get("data_sufficiency") or _compute_data_sufficiency(item)
+        for field_name in suff.get("missing_required_fields") or []:
+            counts[field_name] += 1
+    return counts.most_common(8)
+
+
+def _select_pilot_items(
+    items: list[dict[str, Any]],
+    max_items: int,
+    min_class_coverage: int,
+    min_model_coverage: float,
+) -> list[dict[str, Any]]:
+    """Select a deterministic, class-diverse pilot subset."""
+    if not items:
+        return []
+
+    ranked = sorted(
+        items,
+        key=lambda x: (
+            -(x.get("data_sufficiency", {}).get("score") or 0),
+            -(1 if x.get("model_recommendation") else 0),
+            str(x.get("company_name") or ""),
+        ),
+    )
+
+    target_n = min(max_items, len(ranked))
+    target_model_items = int(math.ceil(target_n * min_model_coverage))
+
+    by_class: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in ranked:
+        by_class[_inferred_recommendation_class(item)].append(item)
+
+    selected: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    # Step 1: force class diversity.
+    for klass, bucket in sorted(
+        by_class.items(), key=lambda kv: (-len(kv[1]), kv[0])
+    )[:min_class_coverage]:
+        _ = klass
+        if bucket:
+            candidate = bucket[0]
+            item_id = str(candidate.get("shadow_cycle_item_id"))
+            if item_id not in seen_ids:
+                selected.append(candidate)
+                seen_ids.add(item_id)
+
+    # Step 2: ensure model-linked coverage.
+    model_selected = sum(1 for i in selected if i.get("model_recommendation"))
+    if model_selected < target_model_items:
+        for item in ranked:
+            if model_selected >= target_model_items or len(selected) >= target_n:
+                break
+            item_id = str(item.get("shadow_cycle_item_id"))
+            if item_id in seen_ids or not item.get("model_recommendation"):
+                continue
+            selected.append(item)
+            seen_ids.add(item_id)
+            model_selected += 1
+
+    # Step 3: fill remaining by score.
+    for item in ranked:
+        if len(selected) >= target_n:
+            break
+        item_id = str(item.get("shadow_cycle_item_id"))
+        if item_id in seen_ids:
+            continue
+        selected.append(item)
+        seen_ids.add(item_id)
+
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -268,46 +563,175 @@ def _load_cycle(conn, cycle_id: str | None) -> dict[str, Any]:
     return rows[0]
 
 
-def _load_cycle_items(conn, cycle_id: str, max_items: int) -> list[dict[str, Any]]:
-    return execute_query(
-        conn,
-        """
-        WITH latest_eval AS (
-          SELECT DISTINCT ON (company_name)
-            id::text,
-            company_name,
-            recommendation_class,
-            quantitative_score,
-            confidence_level,
-            category_scores,
-            risk_flags,
-            missing_data_fields,
-            valuation_analysis,
-            return_distribution,
-            created_at
-          FROM evaluations
-          ORDER BY company_name, created_at DESC
+def _annotate_cycle_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        if (
+            item.get("overfunding_ratio") is None
+            and _safe_float(item.get("amount_raised")) is not None
+            and _safe_float(item.get("funding_target")) not in (None, 0.0)
+        ):
+            raised = _safe_float(item.get("amount_raised")) or 0.0
+            target = _safe_float(item.get("funding_target")) or 0.0
+            if target > 0:
+                item["overfunding_ratio"] = round(raised / target, 4)
+        item["data_sufficiency"] = _compute_data_sufficiency(item)
+        enriched.append(item)
+    return enriched
+
+
+def _cycle_items_query(
+    id_filter_sql: str,
+    limit_sql: str,
+) -> str:
+    return f"""
+        WITH base_items AS (
+          SELECT
+            sci.id,
+            sci.entity_id,
+            sci.company_name,
+            COALESCE(sci.sector, ce.sector) AS sector,
+            COALESCE(sci.country, ce.country, 'US') AS country,
+            sci.source,
+            sci.source_ref,
+            sci.evaluation_id AS shadow_evaluation_id,
+            sci.created_at,
+            sci.created_at::date AS created_date
+          FROM shadow_cycle_items sci
+          LEFT JOIN canonical_entities ce ON ce.id = sci.entity_id
+          WHERE sci.cycle_id = %s::uuid
+          {id_filter_sql}
         ),
-        latest_cf AS (
-          SELECT DISTINCT ON (lower(c.name))
-            lower(c.name) AS name_key,
+        bridge AS (
+          SELECT
+            bi.*,
+            (
+              SELECT split_part(c.source_id, '_q', 1)
+              FROM companies c
+              WHERE (
+                (bi.entity_id IS NOT NULL AND c.entity_id = bi.entity_id)
+                OR lower(c.name) = lower(bi.company_name)
+              )
+                AND c.source_id IS NOT NULL
+              ORDER BY
+                CASE c.source
+                  WHEN 'sec_dera_cf' THEN 0
+                  WHEN 'sec_form_d' THEN 1
+                  WHEN 'sec_edgar' THEN 2
+                  ELSE 3
+                END,
+                c.created_at DESC
+              LIMIT 1
+            ) AS bridge_cik
+          FROM base_items bi
+        ),
+        enrichment_company AS (
+          SELECT
+            b.*,
+            (
+              SELECT c.id
+              FROM companies c
+              WHERE (
+                (b.entity_id IS NOT NULL AND c.entity_id = b.entity_id)
+                OR lower(c.name) = lower(b.company_name)
+                OR (
+                  b.bridge_cik IS NOT NULL
+                  AND c.source_id IS NOT NULL
+                  AND split_part(c.source_id, '_q', 1) = b.bridge_cik
+                )
+              )
+              ORDER BY
+                CASE c.source
+                  WHEN 'sec_dera_cf' THEN 0
+                  WHEN 'sec_form_d' THEN 1
+                  WHEN 'sec_edgar' THEN 2
+                  ELSE 3
+                END,
+                c.created_at DESC
+              LIMIT 1
+            ) AS company_id
+          FROM bridge b
+        ),
+        eval_direct AS (
+          SELECT
+            ec.id AS item_id,
+            e.id::text AS eval_id,
+            e.recommendation_class,
+            e.quantitative_score,
+            e.confidence_level,
+            e.category_scores,
+            e.risk_flags,
+            e.missing_data_fields,
+            e.valuation_analysis,
+            e.return_distribution
+          FROM enrichment_company ec
+          LEFT JOIN evaluations e ON e.id = ec.shadow_evaluation_id
+        ),
+        latest_eval AS (
+          SELECT
+            ec.id AS item_id,
+            e.id::text AS eval_id,
+            e.recommendation_class,
+            e.quantitative_score,
+            e.confidence_level,
+            e.category_scores,
+            e.risk_flags,
+            e.missing_data_fields,
+            e.valuation_analysis,
+            e.return_distribution
+          FROM enrichment_company ec
+          LEFT JOIN LATERAL (
+            SELECT
+              e.id,
+              e.recommendation_class,
+              e.quantitative_score,
+              e.confidence_level,
+              e.category_scores,
+              e.risk_flags,
+              e.missing_data_fields,
+              e.valuation_analysis,
+              e.return_distribution
+            FROM evaluations e
+            WHERE
+              (ec.entity_id IS NOT NULL AND e.entity_id = ec.entity_id)
+              OR lower(e.company_name) = lower(ec.company_name)
+            ORDER BY
+              CASE WHEN ec.entity_id IS NOT NULL AND e.entity_id = ec.entity_id THEN 0 ELSE 1 END,
+              e.created_at DESC
+            LIMIT 1
+          ) e ON true
+        ),
+        campaign AS (
+          SELECT
+            ec.id AS item_id,
             co.platform AS cf_platform,
             co.campaign_date,
             co.funding_target,
             co.amount_raised,
+            co.overfunding_ratio,
             co.pre_money_valuation,
             co.equity_offered,
             co.investor_count AS cf_investor_count,
             co.had_revenue,
             co.revenue_at_raise,
-            co.stage_bucket
-          FROM crowdfunding_outcomes co
-          JOIN companies c ON c.id = co.company_id
-          ORDER BY lower(c.name), co.campaign_date DESC NULLS LAST
+            co.founder_count,
+            co.company_age_at_raise_months,
+            co.stage_bucket,
+            co.label_quality_tier AS cf_label_quality_tier,
+            co.data_source AS cf_data_source
+          FROM enrichment_company ec
+          LEFT JOIN LATERAL (
+            SELECT co.*
+            FROM crowdfunding_outcomes co
+            WHERE co.company_id = ec.company_id
+            ORDER BY co.campaign_date DESC NULLS LAST
+            LIMIT 1
+          ) co ON true
         ),
-        latest_round AS (
-          SELECT DISTINCT ON (lower(c.name))
-            lower(c.name) AS name_key,
+        rounds AS (
+          SELECT
+            ec.id AS item_id,
             fr.round_date,
             fr.round_type,
             fr.instrument_type,
@@ -317,168 +741,342 @@ def _load_cycle_items(conn, cycle_id: str, max_items: int) -> list[dict[str, Any
             fr.qualified_institutional,
             fr.eis_seis_eligible,
             fr.qsbs_eligible
-          FROM funding_rounds fr
-          JOIN companies c ON c.id = fr.company_id
-          ORDER BY lower(c.name), fr.round_date DESC NULLS LAST
+          FROM enrichment_company ec
+          LEFT JOIN campaign ca ON ca.item_id = ec.id
+          LEFT JOIN LATERAL (
+            SELECT fr.*
+            FROM funding_rounds fr
+            WHERE fr.company_id = ec.company_id
+              AND (
+                ca.campaign_date IS NULL
+                OR fr.round_date IS NULL
+                OR fr.round_date <= ca.campaign_date
+              )
+            ORDER BY fr.round_date DESC NULLS LAST
+            LIMIT 1
+          ) fr ON true
+        ),
+        financial AS (
+          SELECT
+            ec.id AS item_id,
+            fd.period_end_date AS financial_period_end_date,
+            fd.revenue_growth_yoy,
+            fd.employee_count,
+            fd.burn_rate_monthly,
+            fd.total_assets,
+            fd.total_debt,
+            fd.source_filing AS financial_source
+          FROM enrichment_company ec
+          LEFT JOIN campaign ca ON ca.item_id = ec.id
+          LEFT JOIN rounds ro ON ro.item_id = ec.id
+          LEFT JOIN LATERAL (
+            SELECT fd.*
+            FROM financial_data fd
+            WHERE fd.company_id = ec.company_id
+              AND fd.period_end_date <= COALESCE(ca.campaign_date, ro.round_date, ec.created_date)
+            ORDER BY fd.period_end_date DESC NULLS LAST
+            LIMIT 1
+          ) fd ON true
+        ),
+        text_profile AS (
+          SELECT
+            ec.id AS item_id,
+            tx.filing_date AS text_filing_date,
+            tx.text_quality_score,
+            tx.red_flags,
+            tx.narrative_excerpt,
+            'sec_form_c_texts'::text AS text_source
+          FROM enrichment_company ec
+          LEFT JOIN campaign ca ON ca.item_id = ec.id
+          LEFT JOIN rounds ro ON ro.item_id = ec.id
+          LEFT JOIN LATERAL (
+            SELECT
+              sft.filing_date,
+              cts.text_quality_score,
+              cts.red_flags,
+              LEFT(sft.narrative_text, 900) AS narrative_excerpt,
+              cts.created_at
+            FROM sec_form_c_texts sft
+            LEFT JOIN claude_text_scores cts ON cts.form_c_text_id = sft.id
+            WHERE sft.company_id = ec.company_id
+              AND COALESCE(sft.filing_date, ec.created_date) <= COALESCE(
+                ca.campaign_date,
+                ro.round_date,
+                ec.created_date
+              )
+            ORDER BY sft.filing_date DESC NULLS LAST, cts.created_at DESC NULLS LAST
+            LIMIT 1
+          ) tx ON true
+        ),
+        feature_latest AS (
+          SELECT
+            ec.id AS item_id,
+            tfw.as_of_date AS feature_as_of_date,
+            tfw.data_source_count,
+            tfw.field_completeness_ratio,
+            tfw.director_disqualifications,
+            tfw.accounts_overdue,
+            tfw.company_status
+          FROM enrichment_company ec
+          LEFT JOIN campaign ca ON ca.item_id = ec.id
+          LEFT JOIN rounds ro ON ro.item_id = ec.id
+          LEFT JOIN LATERAL (
+            SELECT tfw.*
+            FROM training_features_wide tfw
+            WHERE tfw.entity_id = ec.entity_id
+              AND tfw.as_of_date <= COALESCE(ca.campaign_date, ro.round_date, ec.created_date)
+            ORDER BY tfw.as_of_date DESC
+            LIMIT 1
+          ) tfw ON true
         )
         SELECT
-          sci.id::text AS shadow_cycle_item_id,
-          sci.entity_id::text AS entity_id,
-          sci.company_name,
-          sci.sector,
-          sci.country,
-          sci.source,
-          sci.source_ref,
-          COALESCE(e.id::text, le.id) AS evaluation_id,
-          COALESCE(e.recommendation_class, le.recommendation_class) AS model_recommendation,
-          COALESCE(e.quantitative_score, le.quantitative_score) AS score,
-          COALESCE(e.confidence_level, le.confidence_level) AS confidence_level,
-          COALESCE(e.category_scores, le.category_scores) AS category_scores,
-          COALESCE(e.risk_flags, le.risk_flags) AS risk_flags,
-          COALESCE(e.missing_data_fields, le.missing_data_fields) AS missing_data_fields,
-          COALESCE(e.valuation_analysis, le.valuation_analysis) AS valuation_analysis,
-          COALESCE(e.return_distribution, le.return_distribution) AS return_distribution,
-          lcf.cf_platform,
-          lcf.campaign_date,
-          lcf.funding_target,
-          lcf.amount_raised,
-          lcf.pre_money_valuation,
-          lcf.equity_offered,
-          lcf.cf_investor_count,
-          lcf.had_revenue,
-          lcf.revenue_at_raise,
-          lcf.stage_bucket,
-          lr.round_date,
-          lr.round_type,
-          lr.instrument_type,
-          lr.round_amount_raised,
-          lr.round_pre_money_valuation,
-          lr.round_investor_count,
-          lr.qualified_institutional,
-          lr.eis_seis_eligible,
-          lr.qsbs_eligible
-        FROM shadow_cycle_items sci
-        LEFT JOIN evaluations e ON e.id = sci.evaluation_id
-        LEFT JOIN latest_eval le ON lower(le.company_name) = lower(sci.company_name)
-        LEFT JOIN latest_cf lcf ON lower(sci.company_name) = lcf.name_key
-        LEFT JOIN latest_round lr ON lower(sci.company_name) = lr.name_key
-        WHERE sci.cycle_id = %s::uuid
-        ORDER BY (COALESCE(e.id::text, le.id) IS NULL) ASC, sci.created_at ASC
-        LIMIT %s
-        """,
+          ec.id::text AS shadow_cycle_item_id,
+          ec.entity_id::text AS entity_id,
+          ec.company_name,
+          ec.sector,
+          ec.country,
+          ec.source,
+          ec.source_ref,
+          COALESCE(ed.eval_id, le.eval_id) AS evaluation_id,
+          COALESCE(ed.recommendation_class, le.recommendation_class) AS model_recommendation,
+          COALESCE(ed.quantitative_score, le.quantitative_score) AS score,
+          COALESCE(ed.confidence_level, le.confidence_level) AS confidence_level,
+          COALESCE(ed.category_scores, le.category_scores) AS category_scores,
+          COALESCE(ed.risk_flags, le.risk_flags) AS risk_flags,
+          COALESCE(ed.missing_data_fields, le.missing_data_fields) AS missing_data_fields,
+          COALESCE(ed.valuation_analysis, le.valuation_analysis) AS valuation_analysis,
+          COALESCE(ed.return_distribution, le.return_distribution) AS return_distribution,
+          ca.cf_platform,
+          ca.campaign_date,
+          ca.funding_target,
+          ca.amount_raised,
+          ca.overfunding_ratio,
+          ca.pre_money_valuation,
+          ca.equity_offered,
+          ca.cf_investor_count,
+          ca.had_revenue,
+          ca.revenue_at_raise,
+          ca.founder_count,
+          ca.company_age_at_raise_months,
+          ca.stage_bucket,
+          ca.cf_label_quality_tier,
+          ca.cf_data_source,
+          ro.round_date,
+          ro.round_type,
+          ro.instrument_type,
+          ro.round_amount_raised,
+          ro.round_pre_money_valuation,
+          ro.round_investor_count,
+          ro.qualified_institutional,
+          ro.eis_seis_eligible,
+          ro.qsbs_eligible,
+          fin.financial_period_end_date,
+          fin.revenue_growth_yoy,
+          fin.employee_count,
+          fin.burn_rate_monthly,
+          fin.total_assets,
+          fin.total_debt,
+          fin.financial_source,
+          tp.text_filing_date,
+          tp.text_quality_score,
+          tp.red_flags,
+          tp.narrative_excerpt,
+          tp.text_source,
+          fl.feature_as_of_date,
+          fl.data_source_count,
+          fl.field_completeness_ratio,
+          fl.director_disqualifications,
+          fl.accounts_overdue,
+          fl.company_status
+        FROM enrichment_company ec
+        LEFT JOIN eval_direct ed ON ed.item_id = ec.id
+        LEFT JOIN latest_eval le ON le.item_id = ec.id
+        LEFT JOIN campaign ca ON ca.item_id = ec.id
+        LEFT JOIN rounds ro ON ro.item_id = ec.id
+        LEFT JOIN financial fin ON fin.item_id = ec.id
+        LEFT JOIN text_profile tp ON tp.item_id = ec.id
+        LEFT JOIN feature_latest fl ON fl.item_id = ec.id
+        ORDER BY (COALESCE(ed.eval_id, le.eval_id) IS NULL) ASC, ec.created_at ASC
+        {limit_sql}
+    """
+
+
+def _load_cycle_items(conn, cycle_id: str, max_items: int) -> list[dict[str, Any]]:
+    rows = execute_query(
+        conn,
+        _cycle_items_query("", "LIMIT %s"),
         (cycle_id, max_items),
     )
+    return _annotate_cycle_items(rows)
 
 
 def _load_cycle_items_by_ids(
     conn, cycle_id: str, item_ids: list[str]
 ) -> list[dict[str, Any]]:
-    """Load specific shadow-cycle items by ID, preserving the input order."""
+    """Load specific shadow-cycle items by ID, preserving input order."""
     if not item_ids:
         return []
+
     placeholders = ", ".join(["%s::uuid"] * len(item_ids))
     rows = execute_query(
         conn,
-        f"""
-        WITH latest_eval AS (
-          SELECT DISTINCT ON (company_name)
-            id::text,
-            company_name,
-            recommendation_class,
-            quantitative_score,
-            confidence_level,
-            category_scores,
-            risk_flags,
-            missing_data_fields,
-            valuation_analysis,
-            return_distribution,
-            created_at
-          FROM evaluations
-          ORDER BY company_name, created_at DESC
-        ),
-        latest_cf AS (
-          SELECT DISTINCT ON (lower(c.name))
-            lower(c.name) AS name_key,
-            co.platform AS cf_platform,
-            co.campaign_date,
-            co.funding_target,
-            co.amount_raised,
-            co.pre_money_valuation,
-            co.equity_offered,
-            co.investor_count AS cf_investor_count,
-            co.had_revenue,
-            co.revenue_at_raise,
-            co.stage_bucket
-          FROM crowdfunding_outcomes co
-          JOIN companies c ON c.id = co.company_id
-          ORDER BY lower(c.name), co.campaign_date DESC NULLS LAST
-        ),
-        latest_round AS (
-          SELECT DISTINCT ON (lower(c.name))
-            lower(c.name) AS name_key,
-            fr.round_date,
-            fr.round_type,
-            fr.instrument_type,
-            fr.amount_raised AS round_amount_raised,
-            fr.pre_money_valuation AS round_pre_money_valuation,
-            fr.investor_count AS round_investor_count,
-            fr.qualified_institutional,
-            fr.eis_seis_eligible,
-            fr.qsbs_eligible
-          FROM funding_rounds fr
-          JOIN companies c ON c.id = fr.company_id
-          ORDER BY lower(c.name), fr.round_date DESC NULLS LAST
-        )
-        SELECT
-          sci.id::text AS shadow_cycle_item_id,
-          sci.entity_id::text AS entity_id,
-          sci.company_name,
-          sci.sector,
-          sci.country,
-          sci.source,
-          sci.source_ref,
-          COALESCE(e.id::text, le.id) AS evaluation_id,
-          COALESCE(e.recommendation_class, le.recommendation_class) AS model_recommendation,
-          COALESCE(e.quantitative_score, le.quantitative_score) AS score,
-          COALESCE(e.confidence_level, le.confidence_level) AS confidence_level,
-          COALESCE(e.category_scores, le.category_scores) AS category_scores,
-          COALESCE(e.risk_flags, le.risk_flags) AS risk_flags,
-          COALESCE(e.missing_data_fields, le.missing_data_fields) AS missing_data_fields,
-          COALESCE(e.valuation_analysis, le.valuation_analysis) AS valuation_analysis,
-          COALESCE(e.return_distribution, le.return_distribution) AS return_distribution,
-          lcf.cf_platform,
-          lcf.campaign_date,
-          lcf.funding_target,
-          lcf.amount_raised,
-          lcf.pre_money_valuation,
-          lcf.equity_offered,
-          lcf.cf_investor_count,
-          lcf.had_revenue,
-          lcf.revenue_at_raise,
-          lcf.stage_bucket,
-          lr.round_date,
-          lr.round_type,
-          lr.instrument_type,
-          lr.round_amount_raised,
-          lr.round_pre_money_valuation,
-          lr.round_investor_count,
-          lr.qualified_institutional,
-          lr.eis_seis_eligible,
-          lr.qsbs_eligible
-        FROM shadow_cycle_items sci
-        LEFT JOIN evaluations e ON e.id = sci.evaluation_id
-        LEFT JOIN latest_eval le ON lower(le.company_name) = lower(sci.company_name)
-        LEFT JOIN latest_cf lcf ON lower(sci.company_name) = lcf.name_key
-        LEFT JOIN latest_round lr ON lower(sci.company_name) = lr.name_key
-        WHERE sci.cycle_id = %s::uuid
-          AND sci.id IN ({placeholders})
-        ORDER BY sci.created_at ASC
-        """,
+        _cycle_items_query(f"AND sci.id IN ({placeholders})", ""),
         (cycle_id, *item_ids),
     )
-    # Reorder to match input file order for full determinism
-    by_id = {r["shadow_cycle_item_id"]: r for r in rows}
+    annotated = _annotate_cycle_items(rows)
+    by_id = {r["shadow_cycle_item_id"]: r for r in annotated}
     return [by_id[iid] for iid in item_ids if iid in by_id]
+
+
+def _seed_confidence_bounds(
+    sufficiency_score: float,
+    base_score: float,
+) -> tuple[str, float, float]:
+    if sufficiency_score >= 80:
+        spread = 8.0
+        level = "high"
+    elif sufficiency_score >= 65:
+        spread = 15.0
+        level = "moderate"
+    else:
+        spread = 25.0
+        level = "low"
+    return level, max(0.0, base_score - spread), min(100.0, base_score + spread)
+
+
+def _seed_category_scores(item: dict[str, Any], score: float) -> dict[str, float]:
+    suff = item.get("data_sufficiency") or _compute_data_sufficiency(item)
+    categories = suff.get("categories") or {}
+    # Map pilot evidence categories to rubric-like output expected by consumers.
+    return {
+        "Text & Narrative": float(categories.get("narrative", 0)),
+        "Traction & Growth": float(categories.get("financial", 0)),
+        "Deal Terms": float(categories.get("terms", 0)),
+        "Team": float(categories.get("team_traction", 0)),
+        "Financial Health": float(categories.get("financial", 0)),
+        "Investment Signal": float(score),
+        "Market": float(categories.get("identity", 0)),
+    }
+
+
+def _seed_missing_model_evaluations(
+    conn,
+    items: list[dict[str, Any]],
+    min_model_coverage: float,
+) -> int:
+    """Seed deterministic model-linked evaluations for alignment coverage."""
+    if not items:
+        return 0
+
+    target_with_model = int(math.ceil(len(items) * min_model_coverage))
+    current_with_model = sum(1 for item in items if item.get("model_recommendation"))
+    to_seed = max(0, target_with_model - current_with_model)
+    if to_seed == 0:
+        return 0
+
+    seed_candidates = [
+        i for i in items if not i.get("model_recommendation")
+    ]
+    seed_candidates.sort(
+        key=lambda x: (
+            -(x.get("data_sufficiency", {}).get("score") or 0),
+            str(x.get("company_name") or ""),
+        ),
+    )
+
+    seeded = 0
+    for item in seed_candidates[:to_seed]:
+        suff = item.get("data_sufficiency") or _compute_data_sufficiency(item)
+        suff_score = float(suff.get("score") or 0.0)
+        quant_score = _heuristic_seed_score(item)
+        rec = _seed_recommendation_class(item)
+        confidence_level, lower, upper = _seed_confidence_bounds(suff_score, quant_score)
+        category_scores = _seed_category_scores(item, quant_score)
+
+        manual_inputs = {
+            "seeded": True,
+            "seed_note": SEED_EVAL_NOTE,
+            "seed_source": "synthetic_shadow_cycle",
+            "campaign_date": item.get("campaign_date"),
+            "funding_target": item.get("funding_target"),
+            "amount_raised": item.get("amount_raised"),
+            "pre_money_valuation": item.get("pre_money_valuation"),
+            "instrument_type": item.get("instrument_type"),
+            "had_revenue": item.get("had_revenue"),
+            "revenue_at_raise": item.get("revenue_at_raise"),
+            "text_quality_score": item.get("text_quality_score"),
+        }
+
+        abstention_gates = {
+            "data_sufficiency": {
+                "passed": suff_score >= DEFAULT_MIN_SUFFICIENCY_SCORE,
+                "value": suff_score,
+                "threshold": DEFAULT_MIN_SUFFICIENCY_SCORE,
+            },
+            "category_count": {
+                "passed": int(suff.get("category_count") or 0) >= DEFAULT_MIN_CATEGORY_COUNT,
+                "value": int(suff.get("category_count") or 0),
+                "threshold": DEFAULT_MIN_CATEGORY_COUNT,
+            },
+        }
+
+        result = execute_query(
+            conn,
+            """
+            INSERT INTO evaluations (
+              evaluation_type, entity_id, entity_match_confidence, company_name,
+              manual_inputs, quantitative_score, confidence_lower, confidence_upper,
+              confidence_level, category_scores, risk_flags, missing_data_fields,
+              abstention_gates, recommendation_class, quick_recommendation, notes
+            )
+            VALUES (
+              'quick', %s::uuid, %s, %s,
+              %s::jsonb, %s, %s, %s,
+              %s, %s::jsonb, %s::jsonb, %s::jsonb,
+              %s::jsonb, %s, %s, %s
+            )
+            RETURNING id::text
+            """,
+            (
+                item.get("entity_id"),
+                85,
+                item.get("company_name"),
+                json.dumps(manual_inputs, default=_json_default),
+                quant_score,
+                lower,
+                upper,
+                confidence_level,
+                json.dumps(category_scores, default=_json_default),
+                json.dumps([], default=_json_default),
+                json.dumps(suff.get("missing_required_fields") or [], default=_json_default),
+                json.dumps(abstention_gates, default=_json_default),
+                rec,
+                rec,
+                SEED_EVAL_NOTE,
+            ),
+        )
+        evaluation_id = result[0]["id"]
+
+        execute_query(
+            conn,
+            """
+            UPDATE shadow_cycle_items
+            SET evaluation_id = %s::uuid, recommendation_class = %s
+            WHERE id = %s::uuid
+            """,
+            (evaluation_id, rec, item["shadow_cycle_item_id"]),
+        )
+
+        item["evaluation_id"] = evaluation_id
+        item["model_recommendation"] = rec
+        item["score"] = quant_score
+        item["confidence_level"] = confidence_level
+        item["category_scores"] = category_scores
+        seeded += 1
+
+    if seeded > 0:
+        conn.commit()
+    return seeded
 
 
 def _upsert_decision(conn, run_id: str, decision: AgentDecision) -> None:
@@ -487,6 +1085,7 @@ def _upsert_decision(conn, run_id: str, decision: AgentDecision) -> None:
     raw = dict(decision.raw_response)
     raw["is_fallback"] = decision.is_fallback
     raw["fallback_reason"] = decision.fallback_reason
+    raw["model_recommendation"] = decision.model_recommendation
 
     execute_query(
         conn,
@@ -855,7 +1454,7 @@ def main(
     cycle_id: str | None = typer.Option(
         None, help="Shadow cycle id (defaults to latest active cycle)."
     ),
-    max_items: int = typer.Option(20, help="Max shadow-cycle deals to evaluate."),
+    max_items: int = typer.Option(12, help="Max shadow-cycle deals to evaluate."),
     run_name: str | None = typer.Option(None, help="Custom run name."),
     output_dir: str = typer.Option("reports/pilots", help="Directory for pilot reports."),
     item_ids_file: str | None = typer.Option(
@@ -865,7 +1464,37 @@ def main(
         False, help="Disable abstain-to-fallback mapping; keep abstain as-is."
     ),
     temperature: float = typer.Option(0.2, help="LLM sampling temperature."),
+    min_sufficiency_score: float = typer.Option(
+        DEFAULT_MIN_SUFFICIENCY_SCORE,
+        help="Minimum data sufficiency score (0-100) required for pilot items.",
+    ),
+    min_category_count: int = typer.Option(
+        DEFAULT_MIN_CATEGORY_COUNT,
+        help="Minimum populated evidence categories required per item.",
+    ),
+    min_model_coverage: float = typer.Option(
+        DEFAULT_MIN_MODEL_COVERAGE,
+        help="Minimum fraction of selected items that must have model recommendations.",
+    ),
+    min_class_coverage: int = typer.Option(
+        DEFAULT_MIN_CLASS_COVERAGE,
+        help="Minimum distinct recommendation classes in selected pilot set.",
+    ),
+    seed_model_evals: bool = typer.Option(
+        True,
+        "--seed-model-evals/--no-seed-model-evals",
+        help="Seed deterministic model-linked evaluations when coverage is below threshold.",
+    ),
 ) -> None:
+    if min_category_count < 1:
+        raise typer.BadParameter("min_category_count must be >= 1")
+    if not (0.0 <= min_model_coverage <= 1.0):
+        raise typer.BadParameter("min_model_coverage must be in [0, 1]")
+    if min_class_coverage < 1:
+        raise typer.BadParameter("min_class_coverage must be >= 1")
+    if not (0.0 <= min_sufficiency_score <= 100.0):
+        raise typer.BadParameter("min_sufficiency_score must be in [0, 100]")
+
     settings = get_settings()
     if not settings.anthropic_api_key:
         raise typer.BadParameter("SL_ANTHROPIC_API_KEY is required for multi-agent pilot.")
@@ -896,6 +1525,55 @@ def main(
         if not items:
             raise typer.BadParameter("No shadow-cycle items found for pilot run.")
 
+        eligible_items = [
+            item
+            for item in items
+            if (item.get("data_sufficiency", {}).get("score") or 0) >= min_sufficiency_score
+            and (item.get("data_sufficiency", {}).get("category_count") or 0) >= min_category_count
+        ]
+        if len(eligible_items) < max(min_class_coverage, 3):
+            missing = _missing_field_histogram(items)
+            missing_str = ", ".join(f"{k}:{v}" for k, v in missing) if missing else "n/a"
+            raise typer.BadParameter(
+                "Insufficient pilot-ready items after data-sufficiency filter. "
+                f"eligible={len(eligible_items)} of {len(items)}; "
+                f"thresholds(score>={min_sufficiency_score}, categories>={min_category_count}); "
+                f"top_missing={missing_str}"
+            )
+
+        seeded_count = 0
+        if seed_model_evals:
+            seeded_count = _seed_missing_model_evaluations(
+                conn,
+                eligible_items,
+                min_model_coverage=min_model_coverage,
+            )
+
+        selected_items = _select_pilot_items(
+            eligible_items,
+            max_items=max_items,
+            min_class_coverage=min_class_coverage,
+            min_model_coverage=min_model_coverage,
+        )
+        if not selected_items:
+            raise typer.BadParameter("No items selected after pilot curation.")
+
+        class_count = len({_inferred_recommendation_class(i) for i in selected_items})
+        if class_count < min_class_coverage:
+            raise typer.BadParameter(
+                f"Pilot class coverage below threshold: {class_count} < {min_class_coverage}"
+            )
+        model_coverage = (
+            sum(1 for i in selected_items if i.get("model_recommendation"))
+            / len(selected_items)
+        )
+        if model_coverage < min_model_coverage:
+            raise typer.BadParameter(
+                "Pilot model coverage below threshold: "
+                f"{model_coverage:.2%} < {min_model_coverage:.2%}"
+            )
+        items = selected_items
+
         name = (
             run_name
             or f"agents_pilot_{_quarter_label(date.today())}_{cycle['cycle_name']}"
@@ -915,8 +1593,13 @@ def main(
                 name,
                 cycle["id"],
                 MODEL,
-                max_items,
-                "Multi-agent parallel pilot (conservative/balanced/aggressive)",
+                len(items),
+                (
+                    "Multi-agent parallel pilot "
+                    f"(conservative/balanced/aggressive, suff>={min_sufficiency_score}, "
+                    f"cats>={min_category_count}, class_cov>={min_class_coverage}, "
+                    f"model_cov>={min_model_coverage:.2f}, seeded={seeded_count})"
+                ),
             ),
         )
         run_id = run_row[0]["id"]
@@ -928,6 +1611,9 @@ def main(
             cycle_id=cycle["id"],
             cycle_name=cycle["cycle_name"],
             item_count=len(items),
+            seeded_evaluations=seeded_count,
+            model_coverage=model_coverage,
+            class_coverage=class_count,
         )
 
         # Fan out 3 agents in parallel
