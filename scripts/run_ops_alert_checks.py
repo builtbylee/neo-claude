@@ -186,6 +186,39 @@ def main(
                 },
             )
 
+        qa_rows = execute_query(
+            conn,
+            """
+            WITH recent AS (
+              SELECT field_name, is_match
+              FROM transaction_round_qa_audits
+              WHERE audit_week >= CURRENT_DATE - INTERVAL '12 weeks'
+                AND is_match IS NOT NULL
+            )
+            SELECT
+              field_name,
+              COUNT(*) AS sample_size,
+              AVG(CASE WHEN is_match THEN 1.0 ELSE 0.0 END) AS match_rate
+            FROM recent
+            GROUP BY field_name
+            HAVING COUNT(*) >= 10
+               AND AVG(CASE WHEN is_match THEN 1.0 ELSE 0.0 END) < 0.85
+            """,
+        )
+        for row in qa_rows:
+            alerts.append(
+                {
+                    "type": "transaction_qa_drift",
+                    "priority": "high",
+                    "dedupe": f"transaction_qa_drift:{row['field_name']}",
+                    "payload": {
+                        "field_name": row["field_name"],
+                        "sample_size": int(row.get("sample_size") or 0),
+                        "match_rate": float(row.get("match_rate") or 0),
+                    },
+                },
+            )
+
         if enqueue_alerts and alerts:
             for alert in alerts:
                 _enqueue(

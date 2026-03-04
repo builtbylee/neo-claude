@@ -179,8 +179,12 @@ interface ScoreResultProps {
         pricingRevenueSampleSize: number;
         pricingProxySampleSize: number;
         pricingStageAlignedSample: number;
+        pricingStageCountrySectorSample: number;
         pricingSourceBreakdown: Record<string, number>;
         pricingTierBreakdown: Record<"A" | "B" | "C", number>;
+        pricingTierAShare: number;
+        officialSignalCount: number;
+        officialSignalTypeBreakdown: Record<string, number>;
         weightedPricingCoverage: number;
         confidencePenalty: number;
         confidencePenaltyReasons: string[];
@@ -212,6 +216,14 @@ interface ScoreResultProps {
         passedCriteria: number;
         totalCriteria: number;
         reasons: string[];
+      };
+      valuationGate: {
+        passed: boolean;
+        reason: string;
+        stageCountrySectorComps: number;
+        tierAShare: number;
+        coreTermCompleteness: number;
+        valuationCriticalConflicts: number;
       };
       operationalWarnings: string[];
     };
@@ -407,6 +419,9 @@ export default function ScoreResult({ result }: ScoreResultProps) {
               {" · "}revenue-linked {result.comparables.sourceSummary.pricingRevenueSampleSize}
               {" · "}proxy {result.comparables.sourceSummary.pricingProxySampleSize}
               {" · "}stage-aligned {result.comparables.sourceSummary.pricingStageAlignedSample}
+              {" · "}stage-country-sector {result.comparables.sourceSummary.pricingStageCountrySectorSample}
+              {" · "}tier-A share {Math.round(result.comparables.sourceSummary.pricingTierAShare * 100)}%
+              {" · "}official signals {result.comparables.sourceSummary.officialSignalCount}
             </div>
           )}
           {result.sanctions.checked && (
@@ -453,6 +468,25 @@ export default function ScoreResult({ result }: ScoreResultProps) {
             Confidence penalty:{" "}
             <span className="text-neutral-200 font-medium">{result.trust.confidencePenalty}</span>
           </div>
+          <div>
+            Valuation gate:{" "}
+            <span className={result.trust.valuationGate.passed ? "text-green-300 font-medium" : "text-amber-300 font-medium"}>
+              {result.trust.valuationGate.passed ? "passed" : "blocked"}
+            </span>
+            {" · "}
+            comps {result.trust.valuationGate.stageCountrySectorComps}
+            {" · "}
+            tier-A {Math.round(result.trust.valuationGate.tierAShare * 100)}%
+            {" · "}
+            core terms {Math.round(result.trust.valuationGate.coreTermCompleteness * 100)}%
+            {" · "}
+            conflicts {result.trust.valuationGate.valuationCriticalConflicts}
+          </div>
+          {!result.trust.valuationGate.passed && (
+            <div className="text-amber-300">
+              {result.trust.valuationGate.reason}
+            </div>
+          )}
           {result.trust.confidencePenaltyReasons.length > 0 && (
             <div className="text-amber-300">
               {result.trust.confidencePenaltyReasons.join(" ")}

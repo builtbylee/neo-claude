@@ -34,6 +34,12 @@ export interface GateCheckInput {
     reportQuarter: string | null;
     isFresh: boolean;
   } | null;
+  valuationGateMetrics?: {
+    stageCountrySectorComps: number;
+    tierAShare: number;
+    coreTermCompleteness: number;
+    valuationCriticalConflicts: number;
+  } | null;
   // Kill criteria
   directorDisqualified?: boolean;
   underAdministration?: boolean;
@@ -88,20 +94,16 @@ export function checkGates(input: GateCheckInput): GateResult[] {
 
   // Gate 2b: Term consistency (structured terms vs extracted terms)
   const termConflictCount = input.termConflictCount ?? 0;
-  const termConsistencyPassed = termConflictCount <= 1;
+  const termConsistencyPassed = termConflictCount === 0;
   results.push({
     name: "Term Consistency",
     passed: termConsistencyPassed,
     value: termConflictCount,
-    threshold: "<= 1 conflicting term field",
+    threshold: "0 conflicting term fields",
     action: termConsistencyPassed ? "pass" : "abstain",
     reason: termConsistencyPassed
-      ? (
-        termConflictCount === 0
-          ? "No material term conflicts detected."
-          : "Minor term mismatch detected; proceed with caution."
-      )
-      : "Multiple term fields conflict across sources; deep diligence required.",
+      ? "No material term conflicts detected."
+      : "Term fields conflict across sources; deep diligence required.",
   });
 
   // Gate 3: Segment evidence quality (US/UK x stage)
@@ -174,6 +176,31 @@ export function checkGates(input: GateCheckInput): GateResult[] {
         threshold: "latest quarterly report required",
         action: "abstain",
         reason: "No quarterly evidence report available",
+      });
+    }
+
+    if (input.valuationGateMetrics) {
+      const metrics = input.valuationGateMetrics;
+      const analystValuationGatePassed = (
+        metrics.stageCountrySectorComps >= 80
+        && metrics.tierAShare >= 0.30
+        && metrics.coreTermCompleteness >= 0.85
+        && metrics.valuationCriticalConflicts === 0
+      );
+      results.push({
+        name: "Analyst Valuation Gate",
+        passed: analystValuationGatePassed,
+        value: (
+          `comps=${metrics.stageCountrySectorComps},`
+          + ` tierA=${Math.round(metrics.tierAShare * 100)}%,`
+          + ` completeness=${Math.round(metrics.coreTermCompleteness * 100)}%,`
+          + ` conflicts=${metrics.valuationCriticalConflicts}`
+        ),
+        threshold: "comps>=80, tierA>=30%, core_terms>=85%, conflicts=0",
+        action: analystValuationGatePassed ? "pass" : "abstain",
+        reason: analystValuationGatePassed
+          ? "Analyst-grade valuation gate passed."
+          : "Deep diligence only; valuation confidence insufficient.",
       });
     }
   }

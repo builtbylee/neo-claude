@@ -223,6 +223,8 @@ test("findComparables applies source-tier confidence penalties", async () => {
   assert.equal(result.valuationContext?.multipleType, "raise_proxy_multiple");
   assert.equal(result.sourceSummary.pricingTierBreakdown.C, 140);
   assert.equal(result.sourceSummary.pricingStageAlignedSample, 140);
+  assert.equal(result.sourceSummary.pricingStageCountrySectorSample, 140);
+  assert.equal(result.sourceSummary.pricingTierAShare, 0);
   assert.equal(result.valuationConfidence, "low");
   assert.ok(result.sourceSummary.confidencePenalty > 0);
   assert.ok(result.sourceSummary.confidencePenaltyReasons.length > 0);

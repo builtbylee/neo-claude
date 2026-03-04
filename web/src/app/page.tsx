@@ -186,8 +186,12 @@ type ScoreResponse = {
       pricingRevenueSampleSize: number;
       pricingProxySampleSize: number;
       pricingStageAlignedSample: number;
+      pricingStageCountrySectorSample: number;
       pricingSourceBreakdown: Record<string, number>;
       pricingTierBreakdown: Record<"A" | "B" | "C", number>;
+      pricingTierAShare: number;
+      officialSignalCount: number;
+      officialSignalTypeBreakdown: Record<string, number>;
       weightedPricingCoverage: number;
       confidencePenalty: number;
       confidencePenaltyReasons: string[];
@@ -219,6 +223,14 @@ type ScoreResponse = {
       passedCriteria: number;
       totalCriteria: number;
       reasons: string[];
+    };
+    valuationGate: {
+      passed: boolean;
+      reason: string;
+      stageCountrySectorComps: number;
+      tierAShare: number;
+      coreTermCompleteness: number;
+      valuationCriticalConflicts: number;
     };
     operationalWarnings: string[];
   };

@@ -62,8 +62,12 @@ export interface ComparablesResult {
     pricingRevenueSampleSize: number;
     pricingProxySampleSize: number;
     pricingStageAlignedSample: number;
+    pricingStageCountrySectorSample: number;
     pricingSourceBreakdown: Record<string, number>;
     pricingTierBreakdown: Record<"A" | "B" | "C", number>;
+    pricingTierAShare: number;
+    officialSignalCount: number;
+    officialSignalTypeBreakdown: Record<string, number>;
     weightedPricingCoverage: number;
     confidencePenalty: number;
     confidencePenaltyReasons: string[];
@@ -121,6 +125,11 @@ type PricingQueryFn = (
   filters: CohortFilters,
 ) => Promise<PricingCohortRow[]>;
 
+type OfficialSignalQueryFn = (
+  supabase: AnySupabaseClient,
+  filters: CohortFilters,
+) => Promise<Array<{ signal_type: string | null }>>;
+
 const SOURCE_TIER_WEIGHT: Record<"A" | "B" | "C", number> = {
   A: 1.0,
   B: 0.7,
@@ -129,7 +138,13 @@ const SOURCE_TIER_WEIGHT: Record<"A" | "B" | "C", number> = {
 
 function tierForCompanySource(sourceRaw: string | null | undefined): "A" | "B" | "C" {
   const source = (sourceRaw ?? "unknown").toLowerCase();
-  if (["sec_edgar", "sec_dera_cf", "companies_house", "sec_cf_filings"].includes(source)) {
+  if ([
+    "sec_edgar",
+    "sec_dera_cf",
+    "companies_house",
+    "sec_cf_filings",
+    "transaction_rounds_truth",
+  ].includes(source)) {
     return "A";
   }
   if (["sec_form_d", "manual", "academic"].includes(source)) {
@@ -347,6 +362,7 @@ function inferValuationConfidence(input: {
   pricingRevenueSampleSize: number;
   pricingProxySampleSize: number;
   pricingStageAlignedSample: number;
+  pricingStageCountrySectorSample: number;
   tierBreakdown: Record<"A" | "B" | "C", number>;
   weightedCoverage: number;
 }): {
@@ -369,7 +385,8 @@ function inferValuationConfidence(input: {
   let reason: string;
   if (
     hasRevenueMultiples
-    && input.valuationContext.sampleSize >= 200
+    && input.valuationContext.sampleSize >= 250
+    && input.pricingStageCountrySectorSample >= 80
     && input.sourceConfidence !== "low"
     && input.valuationContext.sourceTier !== "C"
   ) {
@@ -403,20 +420,28 @@ function inferValuationConfidence(input: {
     penalty += 1;
     penaltyReasons.push("Low weighted source quality coverage.");
   }
-  if (tierARatio < 0.25) {
+  if (tierARatio < 0.30) {
     confidence = downgradeConfidence(confidence);
     penalty += 1;
-    penaltyReasons.push("Tier-A evidence share is below 25%.");
+    penaltyReasons.push("Tier-A evidence share is below 30%.");
   }
   if (!hasRevenueMultiples || proxyRatio > 0.55) {
     confidence = downgradeConfidence(confidence);
     penalty += 1;
     penaltyReasons.push("Valuation relies heavily on proxy multiples.");
   }
-  if (input.pricingStageAlignedSample > 0 && input.pricingStageAlignedSample < 60) {
+  if (input.pricingStageAlignedSample > 0 && input.pricingStageAlignedSample < 80) {
     confidence = downgradeConfidence(confidence);
     penalty += 1;
-    penaltyReasons.push("Stage-aligned pricing sample is limited (<60 rows).");
+    penaltyReasons.push("Stage-aligned pricing sample is limited (<80 rows).");
+  }
+  if (
+    input.pricingStageCountrySectorSample > 0
+    && input.pricingStageCountrySectorSample < 80
+  ) {
+    confidence = downgradeConfidence(confidence);
+    penalty += 2;
+    penaltyReasons.push("Stage-country-sector matched pricing sample is limited (<80 rows).");
   }
 
   return {
@@ -520,6 +545,55 @@ async function queryPricingFromTrainingFeatures(
       sourceTierWeight: SOURCE_TIER_WEIGHT[sourceTier],
     });
   }
+  return out;
+}
+
+async function queryPricingFromTransactionTruth(
+  supabase: AnySupabaseClient,
+  filters: CohortFilters,
+  limit = 2000,
+): Promise<PricingCohortRow[]> {
+  let query = supabase
+    .from("transaction_rounds")
+    .select(
+      "id, sector, country, stage_bucket, pre_money_valuation, valuation_cap, arr_revenue, amount_raised, source_tier, valuation_gate_pass, confidence_band",
+    )
+    .eq("valuation_gate_pass", true)
+    .order("round_date", { ascending: false, nullsFirst: false })
+    .limit(limit);
+
+  if (filters.sector) query = query.eq("sector", filters.sector);
+  if (filters.country) query = query.eq("country", filters.country);
+  if (filters.stageBucket) query = query.eq("stage_bucket", filters.stageBucket);
+
+  const { data, error } = await query;
+  if (error || !data) return [];
+
+  const out: PricingCohortRow[] = [];
+  for (const row of data as Record<string, unknown>[]) {
+    const confidenceBand = (row.confidence_band as string | null) ?? "low";
+    if (confidenceBand === "low") continue;
+
+    const preMoney = row.pre_money_valuation as number | null;
+    const valuationCap = row.valuation_cap as number | null;
+    const effectivePreMoney = preMoney && preMoney > 0 ? preMoney : valuationCap;
+    if (!effectivePreMoney || effectivePreMoney <= 0) continue;
+
+    const sourceTier = (row.source_tier as "A" | "B" | "C" | null) ?? "C";
+    out.push({
+      key: `tx:${String(row.id)}`,
+      sector: row.sector as string | null,
+      country: row.country as string | null,
+      stageBucket: normalizeStageBucket(row.stage_bucket as string | null),
+      pre_money_valuation: effectivePreMoney,
+      revenue_at_raise: row.arr_revenue as number | null,
+      amount_raised: row.amount_raised as number | null,
+      source: "transaction_rounds_truth",
+      sourceTier,
+      sourceTierWeight: SOURCE_TIER_WEIGHT[sourceTier],
+    });
+  }
+
   return out;
 }
 
@@ -675,6 +749,26 @@ async function queryPricingFromCrowdfundingOutcomes(
     });
 }
 
+async function queryOfficialSignalCoverage(
+  supabase: AnySupabaseClient,
+  filters: CohortFilters,
+): Promise<Array<{ signal_type: string | null }>> {
+  let query = supabase
+    .from("official_traction_signals")
+    .select("signal_type, companies!inner(sector, country)")
+    .order("signal_date", { ascending: false })
+    .limit(2000);
+
+  if (filters.sector) query = query.eq("companies.sector", filters.sector);
+  if (filters.country) query = query.eq("companies.country", filters.country);
+
+  const { data, error } = await query;
+  if (error || !data) return [];
+  return (data as Array<Record<string, unknown>>).map((row) => ({
+    signal_type: row.signal_type as string | null,
+  }));
+}
+
 export async function queryPricingCohort(
   supabase: AnySupabaseClient,
   filters: CohortFilters,
@@ -684,13 +778,14 @@ export async function queryPricingCohort(
   },
 ): Promise<PricingCohortRow[]> {
   const maxRows = opts?.maxRows ?? 1500;
-  const [tfwRows, outcomeRows] = await Promise.all([
+  const [transactionRows, tfwRows, outcomeRows] = await Promise.all([
+    queryPricingFromTransactionTruth(supabase, filters, maxRows),
     queryPricingFromTrainingFeatures(supabase, filters, maxRows),
     queryPricingFromCrowdfundingOutcomes(supabase, filters, maxRows),
   ]);
   if (opts?.liteMode) {
     const dedupLite = new Map<string, PricingCohortRow>();
-    for (const row of [...outcomeRows, ...tfwRows]) {
+    for (const row of [...transactionRows, ...outcomeRows, ...tfwRows]) {
       if (!dedupLite.has(row.key)) dedupLite.set(row.key, row);
     }
     return Array.from(dedupLite.values());
@@ -700,7 +795,7 @@ export async function queryPricingCohort(
   const seen = new Set<string>();
   const out: PricingCohortRow[] = [];
 
-  for (const row of [...outcomeRows, ...tfwRows, ...roundRows]) {
+  for (const row of [...transactionRows, ...outcomeRows, ...tfwRows, ...roundRows]) {
     if (seen.has(row.key)) continue;
     seen.add(row.key);
     out.push(row);
@@ -727,6 +822,7 @@ export async function findComparables(
     queryPricingCohortFn?: PricingQueryFn;
     liteMode?: boolean;
     maxRows?: number;
+    queryOfficialSignalsFn?: OfficialSignalQueryFn;
   },
 ): Promise<ComparablesResult | null> {
   const minCohort = options?.minCohort ?? 20;
@@ -738,6 +834,8 @@ export async function findComparables(
           liteMode: options?.liteMode,
           maxRows: options?.maxRows,
         }));
+  const queryOfficialSignalsFn = options?.queryOfficialSignalsFn
+    ?? (options?.queryCohortFn ? async () => [] : queryOfficialSignalCoverage);
   const stageLabel = input.stageBucket ? ` (${input.stageBucket})` : "";
 
   const attempts: Array<{ label: string; filters: CohortFilters }> = [];
@@ -775,9 +873,10 @@ export async function findComparables(
   });
 
   for (const attempt of attempts) {
-    const [outcomeRowsRaw, pricingRows] = await Promise.all([
+    const [outcomeRowsRaw, pricingRows, officialSignals] = await Promise.all([
       queryCohortFn(supabase, attempt.filters),
       queryPricingCohortFn(supabase, attempt.filters),
+      queryOfficialSignalsFn(supabase, attempt.filters),
     ]);
     const outcomeRows = input.excludeCompanyId
       ? outcomeRowsRaw.filter((r) => r.company_id !== input.excludeCompanyId)
@@ -798,6 +897,12 @@ export async function findComparables(
     const weightedPricingCoverage = pricingRows.length > 0
       ? pricingRows.reduce((acc, row) => acc + row.sourceTierWeight, 0) / pricingRows.length
       : 0;
+    const officialSignalTypeBreakdown: Record<string, number> = {};
+    for (const signal of officialSignals) {
+      const signalType = signal.signal_type ?? "unknown";
+      officialSignalTypeBreakdown[signalType] = (officialSignalTypeBreakdown[signalType] ?? 0) + 1;
+    }
+    const officialSignalCount = officialSignals.length;
 
     const pricingRevenueMultiples = pricingRows
       .map((r) => {
@@ -820,6 +925,11 @@ export async function findComparables(
     const pricingStageAlignedSample = input.stageBucket
       ? pricingRows.filter((r) => r.stageBucket === input.stageBucket).length
       : pricingRows.length;
+    const pricingStageCountrySectorSample = pricingRows.filter((r) => (
+      (!input.stageBucket || r.stageBucket === input.stageBucket)
+      && (!input.sector || r.sector === input.sector)
+      && (!input.country || r.country === input.country)
+    )).length;
 
     const outcomeMultiples = outcomeRows
       .map((r) => {
@@ -890,9 +1000,23 @@ export async function findComparables(
       pricingRevenueSampleSize: pricingRevenueMultiples.length,
       pricingProxySampleSize: pricingProxyMultiples.length,
       pricingStageAlignedSample,
+      pricingStageCountrySectorSample,
       tierBreakdown: pricingTierBreakdown,
       weightedCoverage: weightedPricingCoverage,
     });
+    const pricingTierTotal = (
+      pricingTierBreakdown.A + pricingTierBreakdown.B + pricingTierBreakdown.C
+    );
+    const pricingTierAShare = pricingTierTotal > 0
+      ? pricingTierBreakdown.A / pricingTierTotal
+      : 0;
+    if (officialSignalCount < 20) {
+      valuationConfidenceMeta.confidence = downgradeConfidence(valuationConfidenceMeta.confidence);
+      valuationConfidenceMeta.penalty += 1;
+      valuationConfidenceMeta.penaltyReasons.push(
+        "Official traction signal coverage is sparse (<20 records).",
+      );
+    }
 
     return {
       cohortStats,
@@ -905,8 +1029,12 @@ export async function findComparables(
         pricingRevenueSampleSize: pricingRevenueMultiples.length,
         pricingProxySampleSize: pricingProxyMultiples.length,
         pricingStageAlignedSample,
+        pricingStageCountrySectorSample,
         pricingSourceBreakdown,
         pricingTierBreakdown,
+        pricingTierAShare,
+        officialSignalCount,
+        officialSignalTypeBreakdown,
         weightedPricingCoverage: Math.round(weightedPricingCoverage * 100) / 100,
         confidencePenalty: valuationConfidenceMeta.penalty,
         confidencePenaltyReasons: valuationConfidenceMeta.penaltyReasons,

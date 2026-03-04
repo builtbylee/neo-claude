@@ -59,8 +59,10 @@ test("computeAnalystReadiness returns ready for strong evidence", () => {
     quarterlyEvidenceOk: true,
     sourceTier: "A",
     pricingSampleSize: 300,
-    pricingTierBreakdown: { A: 180, B: 90, C: 30 },
-    termConflictCount: 0,
+    stageCountrySectorComps: 120,
+    tierAShare: 0.7,
+    coreTermCompleteness: 0.9,
+    valuationCriticalConflictCount: 0,
     operationalWarningCount: 0,
   });
 
@@ -77,8 +79,10 @@ test("computeAnalystReadiness returns blocked when critical checks fail", () => 
     quarterlyEvidenceOk: false,
     sourceTier: "C",
     pricingSampleSize: 40,
-    pricingTierBreakdown: { A: 0, B: 10, C: 30 },
-    termConflictCount: 2,
+    stageCountrySectorComps: 20,
+    tierAShare: 0.0,
+    coreTermCompleteness: 0.2,
+    valuationCriticalConflictCount: 2,
     operationalWarningCount: 1,
   });
 

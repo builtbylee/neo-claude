@@ -21,10 +21,13 @@ import {
   loadRegulatoryData,
   loadSegmentEvidence,
   loadLatestQuarterlyEvidence,
+  loadLatestSegmentValuationReliability,
+  loadLatestTransactionRound,
   insertValuationScenarioAudit,
   insertSanctionsScreening,
   type DealTermsRow,
   type FundingRoundRow,
+  type TransactionRoundRow,
 } from "@/lib/db/supabase";
 import {
   extractTermSheetSignals,
@@ -163,6 +166,14 @@ interface QuickScoreResponse {
       totalCriteria: number;
       reasons: string[];
     };
+    valuationGate: {
+      passed: boolean;
+      reason: string;
+      stageCountrySectorComps: number;
+      tierAShare: number;
+      coreTermCompleteness: number;
+      valuationCriticalConflicts: number;
+    };
     operationalWarnings: string[];
   };
 }
@@ -237,12 +248,16 @@ export async function POST(request: NextRequest) {
   let stageBucket: string | null = null;
   let dealTerms: DealTermsRow | null = null;
   let mergedTerms: DealTermsRow | null = null;
+  let latestTransactionRound: TransactionRoundRow | null = null;
   let modelPFail: number | null = null;
   let fundingHistory: FundingRoundRow[] = [];
   let provenance: QuickScoreResponse["provenance"] = null;
   let regulatoryStatus: { companyStatus: string | null; companyNumber: string | null } | null = null;
   let segmentEvidence: QuickScoreResponse["segmentEvidence"] = null;
   let quarterlyEvidence: QuickScoreResponse["quarterlyEvidence"] = null;
+  let latestHighValuationReliability:
+    | { sampleSize: number; mae: number | null; mape: number | null }
+    | null = null;
   let sanctions: QuickScoreResponse["sanctions"] = {
     checked: false,
     matched: false,
@@ -259,6 +274,7 @@ export async function POST(request: NextRequest) {
     if (company?.id) {
       try {
         dealTerms = await loadDealTerms(supabase, company.id);
+        latestTransactionRound = await loadLatestTransactionRound(supabase, company.id);
         fundingHistory = await loadFundingHistory(supabase, company.id);
       } catch {
         operationalWarnings.push("Deal terms could not be loaded from funding history.");
@@ -300,6 +316,9 @@ export async function POST(request: NextRequest) {
           platform: featureRow.platform ?? null,
           country: featureRow.country ?? company.country,
         };
+      }
+      if (!stageBucket && latestTransactionRound?.stage_bucket) {
+        stageBucket = latestTransactionRound.stage_bucket;
       }
 
       try {
@@ -501,6 +520,23 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const valuationReliability = await loadLatestSegmentValuationReliability(
+      supabase,
+      segmentKey,
+      "high",
+    );
+    if (valuationReliability) {
+      latestHighValuationReliability = {
+        sampleSize: valuationReliability.sample_size,
+        mae: valuationReliability.mae,
+        mape: valuationReliability.mape,
+      };
+    }
+  } catch {
+    operationalWarnings.push("Valuation reliability lookup failed.");
+  }
+
+  try {
     const latest = await loadLatestQuarterlyEvidence(supabase);
     if (latest) {
       const currentQuarter = currentQuarterStartIso();
@@ -626,10 +662,43 @@ export async function POST(request: NextRequest) {
   ];
   const confidencePenaltyPoints = Math.min(16, combinedPenalty * 4);
   const adjustedScore = Math.max(0, rubricResult.overallScore - confidencePenaltyPoints);
-  const valuationConfidence = comparables?.valuationConfidence ?? "low";
-  const valuationConfidenceReason =
+  const stageCountrySectorComps =
+    comparables?.sourceSummary.pricingStageCountrySectorSample
+    ?? 0;
+  const tierAShare = comparables?.sourceSummary.pricingTierAShare ?? 0;
+  const coreTermCompleteness = latestTransactionRound?.core_term_completeness ?? 0;
+  const valuationCriticalConflicts = latestTransactionRound?.conflict_count ?? termAudit.conflicts.length;
+  let valuationConfidence: "low" | "medium" | "high" = comparables?.valuationConfidence ?? "low";
+  let valuationConfidenceReason =
     comparables?.valuationConfidenceReason
     ?? "No valuation context was available from current comparables.";
+
+  const reliabilitySupportsHighConfidence = !latestHighValuationReliability
+    ? false
+    : (
+      latestHighValuationReliability.sampleSize >= 30
+      && (latestHighValuationReliability.mae ?? Number.POSITIVE_INFINITY) <= 1.0
+      && (latestHighValuationReliability.mape ?? Number.POSITIVE_INFINITY) <= 0.55
+    );
+  if (valuationConfidence === "high" && !reliabilitySupportsHighConfidence) {
+    valuationConfidence = "medium";
+    valuationConfidenceReason = `${valuationConfidenceReason} Downgraded: high-confidence valuation reliability threshold not met in latest out-of-time evidence.`;
+  }
+
+  const valuationGatePassed = (
+    stageCountrySectorComps >= 80
+    && tierAShare >= 0.30
+    && coreTermCompleteness >= 0.85
+    && valuationCriticalConflicts === 0
+    && valuationConfidence !== "low"
+  );
+  const valuationGateReason = valuationGatePassed
+    ? "Analyst-grade valuation gate passed."
+    : (
+      "Deep diligence only; valuation confidence insufficient "
+      + `(comps=${stageCountrySectorComps}, tierA=${Math.round(tierAShare * 100)}%, `
+      + `core_terms=${Math.round(coreTermCompleteness * 100)}%, conflicts=${valuationCriticalConflicts}).`
+    );
   const valuationScenario = computeValuationScenario({
     stageBucket,
     preMoneyValuation: mergedTerms?.pre_money_valuation ?? null,
@@ -638,6 +707,7 @@ export async function POST(request: NextRequest) {
     cohortMedianMultiple: comparables?.valuationContext?.cohortMedianMultiple ?? null,
     valuationConfidence,
   });
+  const valuationScenarioForResponse = valuationGatePassed ? valuationScenario : null;
 
   // Step 6: Abstention gates
   const gateInput: GateCheckInput = {
@@ -664,7 +734,13 @@ export async function POST(request: NextRequest) {
         }
       : null,
     sanctionsMatch: sanctions.matched,
-    termConflictCount: termAudit.conflicts.length,
+    termConflictCount: Math.max(termAudit.conflicts.length, valuationCriticalConflicts),
+    valuationGateMetrics: {
+      stageCountrySectorComps,
+      tierAShare,
+      coreTermCompleteness,
+      valuationCriticalConflicts,
+    },
   };
 
   const gates = checkGates(gateInput);
@@ -688,6 +764,17 @@ export async function POST(request: NextRequest) {
     };
     assessmentWarning =
       "Model confidence is insufficient for a reliable recommendation. Treated as Deep Diligence by policy.";
+  }
+  if (!valuationGatePassed) {
+    recommendation = {
+      ...recommendation,
+      class: "deep_diligence",
+      label: "Deep Diligence (Valuation Confidence Insufficient)",
+      description: "Pricing opinion is blocked by analyst-grade valuation gate.",
+    };
+    assessmentWarning = assessmentWarning
+      ? `${assessmentWarning} ${valuationGateReason}`
+      : valuationGateReason;
   }
 
   // Step 8: IC Memo generation + missing fields analysis
@@ -779,6 +866,12 @@ export async function POST(request: NextRequest) {
       bear_moic: valuationScenario?.bearMoic ?? null,
       base_moic: valuationScenario?.baseMoic ?? null,
       bull_moic: valuationScenario?.bullMoic ?? null,
+      valuation_gate_pass: valuationGatePassed,
+      valuation_gate_reason: valuationGateReason,
+      stage_country_sector_comps: stageCountrySectorComps,
+      tier_a_share: tierAShare,
+      core_term_completeness: coreTermCompleteness,
+      valuation_term_conflicts: valuationCriticalConflicts,
     });
   } catch {
     // Audit logging failures should not block scoring
@@ -795,12 +888,10 @@ export async function POST(request: NextRequest) {
     ),
     sourceTier: comparables?.valuationContext?.sourceTier ?? "unknown",
     pricingSampleSize: comparables?.sourceSummary.pricingSampleSize ?? 0,
-    pricingTierBreakdown: comparables?.sourceSummary.pricingTierBreakdown ?? {
-      A: 0,
-      B: 0,
-      C: 0,
-    },
-    termConflictCount: termAudit.conflicts.length,
+    stageCountrySectorComps,
+    tierAShare,
+    coreTermCompleteness,
+    valuationCriticalConflictCount: valuationCriticalConflicts,
     operationalWarningCount: operationalWarnings.length,
   });
 
@@ -812,6 +903,14 @@ export async function POST(request: NextRequest) {
     termFieldSources: termAudit.fieldSources,
     termConflicts: termAudit.conflicts,
     analystReadiness: readiness,
+    valuationGate: {
+      passed: valuationGatePassed,
+      reason: valuationGateReason,
+      stageCountrySectorComps,
+      tierAShare,
+      coreTermCompleteness,
+      valuationCriticalConflicts,
+    },
     operationalWarnings,
   };
 
@@ -860,7 +959,7 @@ export async function POST(request: NextRequest) {
       warnings: documentIngestion.warnings,
     },
     provenance,
-    valuationScenario,
+    valuationScenario: valuationScenarioForResponse,
     valuationConfidence,
     valuationConfidenceReason,
     segmentEvidence,

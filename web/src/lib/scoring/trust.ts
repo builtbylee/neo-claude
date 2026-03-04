@@ -50,8 +50,10 @@ interface AnalystReadinessInput {
   quarterlyEvidenceOk: boolean;
   sourceTier: SourceTier;
   pricingSampleSize: number;
-  pricingTierBreakdown: Record<"A" | "B" | "C", number>;
-  termConflictCount: number;
+  stageCountrySectorComps: number;
+  tierAShare: number;
+  coreTermCompleteness: number;
+  valuationCriticalConflictCount: number;
   operationalWarningCount: number;
 }
 
@@ -82,11 +84,6 @@ function hasConflict(dbValue: unknown, derivedValue: unknown): boolean {
     return numericConflict(dbValue, derivedValue);
   }
   return String(dbValue).toLowerCase() !== String(derivedValue).toLowerCase();
-}
-
-function tierARatio(tierBreakdown: Record<"A" | "B" | "C", number>): number {
-  const total = tierBreakdown.A + tierBreakdown.B + tierBreakdown.C;
-  return total > 0 ? tierBreakdown.A / total : 0;
 }
 
 export function auditTermSignals(
@@ -165,7 +162,6 @@ export function auditTermSignals(
 export function computeAnalystReadiness(
   input: AnalystReadinessInput,
 ): AnalystReadinessResult {
-  const tierAR = tierARatio(input.pricingTierBreakdown);
   const checks: Array<{ passed: boolean; reason: string }> = [
     {
       passed: input.dataCompleteness >= 0.60,
@@ -184,16 +180,24 @@ export function computeAnalystReadiness(
       reason: "Quarterly evidence report is stale or not release-ready.",
     },
     {
-      passed: input.valuationConfidence !== "low" && input.pricingSampleSize >= 120,
-      reason: "Valuation comparables are low-confidence or sparse (<120 rows).",
+      passed: input.valuationConfidence !== "low",
+      reason: "Valuation confidence is low.",
     },
     {
-      passed: input.sourceTier !== "C" && input.sourceTier !== "unknown" && tierAR >= 0.25,
-      reason: "Tier-A pricing evidence share is below 25% or source tier is too weak.",
+      passed: input.stageCountrySectorComps >= 80,
+      reason: "Stage-country-sector comparable sample is below 80.",
     },
     {
-      passed: input.termConflictCount === 0,
-      reason: "Term-sheet fields conflict across data sources.",
+      passed: input.sourceTier !== "C" && input.sourceTier !== "unknown" && input.tierAShare >= 0.30,
+      reason: "Tier-A pricing evidence share is below 30% or source tier is too weak.",
+    },
+    {
+      passed: input.coreTermCompleteness >= 0.85,
+      reason: "Core term completeness is below 85%.",
+    },
+    {
+      passed: input.valuationCriticalConflictCount === 0,
+      reason: "Valuation-critical term conflicts were detected across sources.",
     },
     {
       passed: input.operationalWarningCount === 0,

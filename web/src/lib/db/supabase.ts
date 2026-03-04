@@ -107,6 +107,39 @@ export interface FundingRoundRow extends DealTermsRow {
   id: string;
 }
 
+export interface TransactionRoundRow {
+  id: string;
+  stage_bucket: string | null;
+  round_type: string | null;
+  instrument_type: string | null;
+  amount_raised: number | null;
+  pre_money_valuation: number | null;
+  post_money_valuation: number | null;
+  valuation_cap: number | null;
+  discount_rate: number | null;
+  interest_rate: number | null;
+  maturity_date: string | null;
+  liquidation_preference_multiple: number | null;
+  liquidation_participation: string | null;
+  pro_rata_rights: boolean | null;
+  lead_investor: string | null;
+  lead_investor_quality: number | null;
+  arr_revenue: number | null;
+  revenue_growth_yoy: number | null;
+  burn_rate_monthly: number | null;
+  runway_months: number | null;
+  source_tier: "A" | "B" | "C";
+  source_count: number;
+  conflict_count: number;
+  core_term_completeness: number;
+  confidence_score: number;
+  confidence_band: "low" | "medium" | "high";
+  valuation_gate_pass: boolean;
+  valuation_gate_reason: string | null;
+  source_timestamp: string | null;
+  round_date: string | null;
+}
+
 /**
  * Load deal terms from the most recent funding round for a company.
  */
@@ -114,6 +147,34 @@ export async function loadDealTerms(
   supabase: AnySupabaseClient,
   companyId: string,
 ): Promise<DealTermsRow | null> {
+  const latestTransactionRound = await loadLatestTransactionRound(supabase, companyId);
+  if (latestTransactionRound) {
+    return {
+      instrument_type: latestTransactionRound.instrument_type,
+      round_type: latestTransactionRound.round_type,
+      amount_raised: latestTransactionRound.amount_raised,
+      pre_money_valuation: latestTransactionRound.pre_money_valuation,
+      valuation_cap: latestTransactionRound.valuation_cap,
+      discount_rate: latestTransactionRound.discount_rate,
+      interest_rate: latestTransactionRound.interest_rate,
+      maturity_date: latestTransactionRound.maturity_date,
+      liquidation_preference_multiple: latestTransactionRound.liquidation_preference_multiple,
+      liquidation_participation: latestTransactionRound.liquidation_participation,
+      pro_rata_rights: latestTransactionRound.pro_rata_rights,
+      pro_rata_amount: null,
+      platform: "transaction_truth",
+      round_date: latestTransactionRound.round_date,
+      overfunding_ratio: null,
+      investor_count: null,
+      funding_velocity_days: null,
+      eis_seis_eligible: null,
+      qsbs_eligible: null,
+      qualified_institutional: latestTransactionRound.lead_investor_quality !== null
+        ? latestTransactionRound.lead_investor_quality >= 0.75
+        : null,
+    };
+  }
+
   const { data } = await supabase
     .from("funding_rounds")
     .select(
@@ -125,6 +186,25 @@ export async function loadDealTerms(
 
   if (data && data.length > 0) return data[0] as DealTermsRow;
   return null;
+}
+
+export async function loadLatestTransactionRound(
+  supabase: AnySupabaseClient,
+  companyId: string,
+): Promise<TransactionRoundRow | null> {
+  const { data } = await supabase
+    .from("transaction_rounds")
+    .select(
+      "id, stage_bucket, round_type, instrument_type, amount_raised, pre_money_valuation, post_money_valuation, valuation_cap, discount_rate, interest_rate, maturity_date, liquidation_preference_multiple, liquidation_participation, pro_rata_rights, lead_investor, lead_investor_quality, arr_revenue, revenue_growth_yoy, burn_rate_monthly, runway_months, source_tier, source_count, conflict_count, core_term_completeness, confidence_score, confidence_band, valuation_gate_pass, valuation_gate_reason, source_timestamp, round_date",
+    )
+    .eq("company_id", companyId)
+    .order("round_date", { ascending: false, nullsFirst: false })
+    .order("source_timestamp", { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!data) return null;
+  return data as TransactionRoundRow;
 }
 
 /**
@@ -225,6 +305,12 @@ export interface ValuationAuditInsert {
   bear_moic: number | null;
   base_moic: number | null;
   bull_moic: number | null;
+  valuation_gate_pass?: boolean | null;
+  valuation_gate_reason?: string | null;
+  stage_country_sector_comps?: number | null;
+  tier_a_share?: number | null;
+  core_term_completeness?: number | null;
+  valuation_term_conflicts?: number | null;
 }
 
 export interface SanctionsScreeningInsert {
@@ -251,6 +337,16 @@ export interface QuarterlyEvidenceRow {
   generated_at: string;
   release_readiness: boolean;
   artifact_path: string | null;
+}
+
+export interface SegmentValuationReliabilityRow {
+  cohort_quarter: string;
+  segment_key: string;
+  valuation_confidence: "high" | "medium" | "low";
+  sample_size: number;
+  mae: number | null;
+  mape: number | null;
+  coverage_ratio: number | null;
 }
 
 /**
@@ -309,6 +405,24 @@ export async function loadLatestQuarterlyEvidence(
     .maybeSingle();
   if (!data) return null;
   return data as QuarterlyEvidenceRow;
+}
+
+export async function loadLatestSegmentValuationReliability(
+  supabase: AnySupabaseClient,
+  segmentKey: string,
+  confidence: "high" | "medium" | "low" = "high",
+): Promise<SegmentValuationReliabilityRow | null> {
+  const { data } = await supabase
+    .from("valuation_cohort_mae")
+    .select("cohort_quarter, segment_key, valuation_confidence, sample_size, mae, mape, coverage_ratio")
+    .eq("segment_key", segmentKey)
+    .eq("valuation_confidence", confidence)
+    .order("cohort_quarter", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!data) return null;
+  return data as SegmentValuationReliabilityRow;
 }
 
 export async function insertValuationScenarioAudit(

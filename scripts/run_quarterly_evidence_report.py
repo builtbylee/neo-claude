@@ -18,6 +18,9 @@ logger = structlog.get_logger(__name__)
 app = typer.Typer()
 
 SEGMENTS = ["US_Seed", "US_EarlyGrowth", "UK_Seed", "UK_EarlyGrowth"]
+HIGH_CONFIDENCE_VALUATION_MAE_MAX = 1.0
+HIGH_CONFIDENCE_VALUATION_MAPE_MAX = 0.55
+HIGH_CONFIDENCE_VALUATION_MIN_SAMPLE = 30
 
 
 def _quarter_start(d: date) -> date:
@@ -161,17 +164,12 @@ def main(
             seg_rows = [
                 r
                 for r in curves
-                if (
-                    r["segment_key"] == segment
-                    and r["sample_size"]
-                    and r["abs_error"] is not None
-                )
+                if (r["segment_key"] == segment and r["sample_size"] and r["abs_error"] is not None)
             ]
             if not seg_rows:
                 continue
             weighted_abs_error = sum(
-                float(r["abs_error"]) * int(r["sample_size"])
-                for r in seg_rows
+                float(r["abs_error"]) * int(r["sample_size"]) for r in seg_rows
             )
             total_samples = sum(int(r["sample_size"]) for r in seg_rows)
             if total_samples > 0:
@@ -205,6 +203,19 @@ def main(
                 and seg.get("calibration_ece") is not None
                 and float(seg["calibration_ece"]) <= 0.10
             )
+            valuation_latest_high = valuation_by_segment.get(key, {}).get("high")
+            high_confidence_allowed = False
+            if valuation_latest_high:
+                mae = valuation_latest_high.get("mae")
+                mape = valuation_latest_high.get("mape")
+                sample = int(valuation_latest_high.get("sampleSize") or 0)
+                high_confidence_allowed = (
+                    sample >= HIGH_CONFIDENCE_VALUATION_MIN_SAMPLE
+                    and isinstance(mae, (int, float))
+                    and isinstance(mape, (int, float))
+                    and float(mae) <= HIGH_CONFIDENCE_VALUATION_MAE_MAX
+                    and float(mape) <= HIGH_CONFIDENCE_VALUATION_MAPE_MAX
+                )
             segment_summary.append(
                 {
                     "segmentKey": key,
@@ -220,11 +231,16 @@ def main(
                     "rollingWindows": window_by_segment.get(key, [])[:5],
                     "calibrationCurveError": curve_error_by_segment.get(key),
                     "valuationMae": valuation_by_segment.get(key, {}),
+                    "valuationHighConfidenceAllowed": high_confidence_allowed,
                     "evidenceOk": evidence_ok,
                 },
             )
 
-        release_ready = all(item["evidenceOk"] for item in segment_summary) and holdout_count > 0
+        release_ready = (
+            all(item["evidenceOk"] for item in segment_summary)
+            and all(item["valuationHighConfidenceAllowed"] for item in segment_summary)
+            and holdout_count > 0
+        )
         summary = {
             "quarter": str(quarter),
             "quarterLabel": quarter_label,
@@ -248,19 +264,26 @@ def main(
             f"- Holdout window: `{holdout_window}` ({holdout_count} entities)",
             f"- Release ready: {'yes' if release_ready else 'no'}",
             "",
-            "| Segment | Sample | AUC | ECE | Release Gate | Curve Error | Evidence OK |",
-            "| --- | ---: | ---: | ---: | :---: | ---: | :---: |",
+            (
+                "| Segment | Sample | AUC | ECE | Release Gate | Curve Error | "
+                "High-Conf Valuation | Evidence OK |"
+            ),
+            "| --- | ---: | ---: | ---: | :---: | ---: | :---: | :---: |",
         ]
         for seg in segment_summary:
             md_lines.append(
-                "| {segment} | {sample} | {auc} | {ece} | {gate} | {curve} | {ok} |".format(
+                "| {segment} | {sample} | {auc} | {ece} | {gate} | {curve} | {val} | {ok} |".format(
                     segment=seg["segmentKey"],
                     sample=seg["sampleSize"],
                     auc=seg["survivalAuc"],
                     ece=seg["calibrationEce"],
                     gate="yes" if seg["releaseGateOpen"] else "no",
-                    curve=(round(seg["calibrationCurveError"], 4)
-                           if isinstance(seg["calibrationCurveError"], (float, int)) else "n/a"),
+                    curve=(
+                        round(seg["calibrationCurveError"], 4)
+                        if isinstance(seg["calibrationCurveError"], (float, int))
+                        else "n/a"
+                    ),
+                    val="yes" if seg["valuationHighConfidenceAllowed"] else "no",
                     ok="yes" if seg["evidenceOk"] else "no",
                 ),
             )
