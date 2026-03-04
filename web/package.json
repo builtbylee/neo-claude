@@ -6,8 +6,8 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "build:cf": "npx @opennextjs/cloudflare build",
-    "preview": "npx wrangler dev",
-    "deploy": "npx wrangler deploy",
+    "preview": "./scripts/wrangler-safe.sh dev",
+    "deploy": "./scripts/wrangler-safe.sh deploy",
     "start": "next start",
     "test": "tsx --test src/**/*.test.ts"
   },
