@@ -63,6 +63,13 @@ export interface RubricInput {
   sector: string | null;
   revenueGrowthYoy: number | null;
   preMoneyValuation: number | null;
+  valuationCap?: number | null;
+  discountRate?: number | null;
+  interestRate?: number | null;
+  maturityDate?: string | null;
+  liquidationPreferenceMultiple?: number | null;
+  liquidationParticipation?: string | null;
+  proRataRights?: boolean | null;
   instrumentType: string | null;
   investorCount: number | null;
   fundingVelocityDays: number | null;
@@ -140,6 +147,46 @@ function scoreDealTerms(input: RubricInput): number {
     if (instrument.includes("equity")) score += 4;
     if (instrument.includes("safe") || instrument.includes("convertible")) score -= 4;
     if (instrument.includes("debt")) score -= 8;
+
+    if (instrument.includes("safe") || instrument.includes("convertible")) {
+      if (input.valuationCap !== null && input.valuationCap !== undefined) score += 4;
+      else score -= 6;
+
+      if (input.discountRate !== null && input.discountRate !== undefined) {
+        if (input.discountRate >= 0.1 && input.discountRate <= 0.25) score += 3;
+        else if (input.discountRate > 0.35 || input.discountRate < 0.05) score -= 2;
+      } else {
+        score -= 3;
+      }
+
+      if (instrument.includes("convertible")) {
+        if (input.maturityDate) score += 1;
+        else score -= 2;
+      }
+    }
+  }
+
+  if (input.interestRate !== null && input.interestRate !== undefined) {
+    if (input.interestRate > 0.12) score -= 4;
+    else if (input.interestRate > 0.08) score -= 2;
+  }
+
+  if (
+    input.liquidationPreferenceMultiple !== null
+    && input.liquidationPreferenceMultiple !== undefined
+  ) {
+    if (input.liquidationPreferenceMultiple > 1) score -= 8;
+    else if (input.liquidationPreferenceMultiple === 1) score += 2;
+  }
+
+  if (input.liquidationParticipation) {
+    const lp = input.liquidationParticipation.toLowerCase();
+    if (lp.includes("participating") && !lp.includes("non")) score -= 6;
+  }
+
+  if (input.proRataRights !== null && input.proRataRights !== undefined) {
+    if (input.proRataRights) score += 3;
+    else score -= 1;
   }
 
   if (input.investorCount !== null) {

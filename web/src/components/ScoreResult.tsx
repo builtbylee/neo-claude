@@ -55,6 +55,14 @@ interface ScoreResultProps {
       round_type: string | null;
       amount_raised: number | null;
       pre_money_valuation: number | null;
+      valuation_cap: number | null;
+      discount_rate: number | null;
+      interest_rate: number | null;
+      maturity_date: string | null;
+      liquidation_preference_multiple: number | null;
+      liquidation_participation: string | null;
+      pro_rata_rights: boolean | null;
+      pro_rata_amount: number | null;
       platform: string | null;
       round_date: string | null;
       overfunding_ratio: number | null;
@@ -70,6 +78,14 @@ interface ScoreResultProps {
       round_type: string | null;
       amount_raised: number | null;
       pre_money_valuation: number | null;
+      valuation_cap: number | null;
+      discount_rate: number | null;
+      interest_rate: number | null;
+      maturity_date: string | null;
+      liquidation_preference_multiple: number | null;
+      liquidation_participation: string | null;
+      pro_rata_rights: boolean | null;
+      pro_rata_amount: number | null;
       platform: string | null;
       round_date: string | null;
       overfunding_ratio: number | null;
@@ -183,6 +199,12 @@ interface ScoreResultProps {
         campaignDate: string | null;
       }>;
     } | null;
+    trust: {
+      sourceTier: "A" | "B" | "C" | "unknown";
+      confidencePenalty: number;
+      confidencePenaltyReasons: string[];
+      abstainReasons: string[];
+    };
   };
 }
 
@@ -390,6 +412,39 @@ export default function ScoreResult({ result }: ScoreResultProps) {
         </div>
       )}
 
+      <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
+        <h3 className="text-sm font-semibold text-neutral-300 mb-3">
+          Trust Signals
+        </h3>
+        <div className="text-xs text-neutral-400 space-y-1.5">
+          <div>
+            Source tier:{" "}
+            <span className="text-neutral-200 font-medium">{result.trust.sourceTier}</span>
+          </div>
+          <div>
+            Confidence penalty:{" "}
+            <span className="text-neutral-200 font-medium">{result.trust.confidencePenalty}</span>
+          </div>
+          {result.trust.confidencePenaltyReasons.length > 0 && (
+            <div className="text-amber-300">
+              {result.trust.confidencePenaltyReasons.join(" ")}
+            </div>
+          )}
+          {result.trust.abstainReasons.length > 0 && (
+            <div>
+              Abstain reasons:
+              <ul className="mt-1 space-y-1">
+                {result.trust.abstainReasons.map((reason, idx) => (
+                  <li key={`${reason}-${idx}`} className="text-neutral-300">
+                    - {reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* IC Memo — shown prominently before category breakdown */}
       {result.memo && (
         <div className="bg-neutral-800/50 rounded-xl p-5 border border-neutral-700/50">
@@ -529,6 +584,38 @@ export default function ScoreResult({ result }: ScoreResultProps) {
                 </span>
               </div>
             )}
+            {result.dealTerms.valuation_cap !== null && (
+              <div>
+                <span className="text-neutral-500">Valuation Cap: </span>
+                <span className="text-neutral-200 font-medium">
+                  ${Math.round(result.dealTerms.valuation_cap).toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.discount_rate !== null && (
+              <div>
+                <span className="text-neutral-500">Discount: </span>
+                <span className="text-neutral-200 font-medium">
+                  {Math.round(result.dealTerms.discount_rate * 100)}%
+                </span>
+              </div>
+            )}
+            {result.dealTerms.interest_rate !== null && (
+              <div>
+                <span className="text-neutral-500">Interest: </span>
+                <span className="text-neutral-200 font-medium">
+                  {Math.round(result.dealTerms.interest_rate * 100)}%
+                </span>
+              </div>
+            )}
+            {result.dealTerms.maturity_date && (
+              <div>
+                <span className="text-neutral-500">Maturity: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.dealTerms.maturity_date}
+                </span>
+              </div>
+            )}
             {result.dealTerms.platform && (
               <div>
                 <span className="text-neutral-500">Platform: </span>
@@ -550,6 +637,38 @@ export default function ScoreResult({ result }: ScoreResultProps) {
                 <span className="text-neutral-500">Investors: </span>
                 <span className="text-neutral-200 font-medium">
                   {result.dealTerms.investor_count.toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.liquidation_preference_multiple !== null && (
+              <div>
+                <span className="text-neutral-500">Liquidation Pref: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.dealTerms.liquidation_preference_multiple}x
+                </span>
+              </div>
+            )}
+            {result.dealTerms.liquidation_participation && (
+              <div>
+                <span className="text-neutral-500">Participation: </span>
+                <span className="text-neutral-200 font-medium capitalize">
+                  {result.dealTerms.liquidation_participation.replace(/_/g, " ")}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.pro_rata_rights !== null && (
+              <div>
+                <span className="text-neutral-500">Pro-Rata Rights: </span>
+                <span className="text-neutral-200 font-medium">
+                  {result.dealTerms.pro_rata_rights ? "Yes" : "No"}
+                </span>
+              </div>
+            )}
+            {result.dealTerms.pro_rata_amount !== null && (
+              <div>
+                <span className="text-neutral-500">Pro-Rata Amount: </span>
+                <span className="text-neutral-200 font-medium">
+                  ${Math.round(result.dealTerms.pro_rata_amount).toLocaleString()}
                 </span>
               </div>
             )}
@@ -1042,11 +1161,11 @@ export default function ScoreResult({ result }: ScoreResultProps) {
         </div>
       )}
 
-      {/* Gates */}
-      {failedGates.length > 0 && !isAbstain && (
+      {/* Gates / Abstain Reasons */}
+      {failedGates.length > 0 && (
         <div className="bg-red-950/30 rounded-xl p-5 border border-red-800/30">
           <h3 className="text-sm font-semibold text-red-400 mb-3">
-            Gate Alerts
+            {result.recommendation.originalClass === "abstain" ? "Abstain Reasons" : "Gate Alerts"}
           </h3>
           <div className="space-y-2">
             {failedGates.map((gate) => (

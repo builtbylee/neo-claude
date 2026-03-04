@@ -309,6 +309,28 @@ class TestAggregation:
         assert summary["totalItems"] == 2
         assert summary["disagreementRate"] == 0.5
 
+    def test_fallback_reason_distribution_aggregated(self) -> None:
+        profile = next(p for p in AGENT_PROFILES if p["id"] == "balanced")
+        state = AgentState(profile=profile)
+        state.decisions.append(
+            AgentDecision(
+                shadow_cycle_item_id="item-1",
+                company_name="Alpha",
+                analyst_profile="balanced",
+                recommendation_class="watch",
+                conviction=55,
+                rationale="fallback case",
+                key_risks=[],
+                data_gaps=[],
+                raw_response={},
+                model_recommendation=None,
+                is_fallback=True,
+                fallback_reason="abstain_with_actionable_context",
+            )
+        )
+        summary = _aggregate("test-run", self._cycle(), [state])
+        assert summary["fallbackReasonDistribution"] == {"abstain_with_actionable_context": 1}
+
 
 # ---------------------------------------------------------------------------
 # Malformed JSON fallback
@@ -348,6 +370,31 @@ class TestMalformedJsonFallback:
         result = asyncio.run(_ask_persona_async(client, persona, context))
         assert result["recommendation_class"] == "watch"
         assert call_count == 2
+
+    def test_normalizes_non_list_risks_and_gaps(self) -> None:
+        async def mock_create(**kwargs):
+            return _make_claude_response(
+                {
+                    "recommendation_class": "watch",
+                    "conviction": 70,
+                    "rationale": "ok",
+                    "key_risks": "single risk string",
+                    "data_gaps": "single gap string",
+                }
+            )
+
+        client = AsyncMock()
+        client.messages.create = mock_create
+        persona = AGENT_PROFILES[1]
+        context = {
+            "company": {"name": "NormCo"},
+            "model_output": {"score": 60},
+            "deal_snapshot": {"latest_round": {"amount_raised": 250000}},
+        }
+
+        result = asyncio.run(_ask_persona_async(client, persona, context))
+        assert result["key_risks"] == ["single risk string"]
+        assert result["data_gaps"] == ["single gap string"]
 
 
 # ---------------------------------------------------------------------------

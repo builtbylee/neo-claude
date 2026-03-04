@@ -177,6 +177,11 @@ export function identifyMissingFields(input: MemoInput): MissingField[] {
     isPresent(input.features?.funding_target);
   const hasFinancials = isPresent(input.features?.total_assets);
   const hasGrowth = isPresent(input.extractedFacts?.revenueGrowthYoy);
+  const instrument = String(input.features?.instrument_type ?? "").toLowerCase();
+  const termsRequireCap = instrument.includes("safe") || instrument.includes("convertible");
+  const hasValuationCap = isPresent(input.features?.valuation_cap);
+  const hasDiscount = isPresent(input.features?.discount_rate);
+  const hasLiquidationPref = isPresent(input.features?.liquidation_preference_multiple);
 
   if (!hasText) {
     missing.push({
@@ -215,6 +220,30 @@ export function identifyMissingFields(input: MemoInput): MissingField[] {
       field: "revenueGrowthYoy",
       label: "Revenue growth rate",
       impact: "Strong growth (>50% YoY) adds up to 20 points to Traction & Growth score.",
+    });
+  }
+
+  if (termsRequireCap && !hasValuationCap) {
+    missing.push({
+      field: "valuationCap",
+      label: "Valuation cap (SAFE/convertible)",
+      impact: "Missing cap weakens term-sheet quality and increases downside uncertainty.",
+    });
+  }
+
+  if (termsRequireCap && !hasDiscount) {
+    missing.push({
+      field: "discountRate",
+      label: "Discount rate (SAFE/convertible)",
+      impact: "Discount materially affects conversion economics and investor ownership.",
+    });
+  }
+
+  if (!hasLiquidationPref) {
+    missing.push({
+      field: "liquidationPreference",
+      label: "Liquidation preference terms",
+      impact: "Preference stack drives downside recovery and true return profile.",
     });
   }
 

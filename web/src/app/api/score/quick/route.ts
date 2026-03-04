@@ -26,7 +26,11 @@ import {
   type DealTermsRow,
   type FundingRoundRow,
 } from "@/lib/db/supabase";
-import { ingestDocuments, type UploadedDocument } from "@/lib/enrichment/document-ingestion";
+import {
+  extractTermSheetSignals,
+  ingestDocuments,
+  type UploadedDocument,
+} from "@/lib/enrichment/document-ingestion";
 import { scrapeWebsite } from "@/lib/enrichment/website-scraper";
 import { scoreFromKnowledge } from "@/lib/enrichment/knowledge-enrichment";
 import { type CompanyFeatures, type ExportedModel, predict } from "@/lib/scoring/inference";
@@ -145,6 +149,44 @@ interface QuickScoreResponse {
     usedThisMonth: number;
     remaining: number;
   } | null;
+  trust: {
+    sourceTier: "A" | "B" | "C" | "unknown";
+    confidencePenalty: number;
+    confidencePenaltyReasons: string[];
+    abstainReasons: string[];
+  };
+}
+
+function mergeDealTerms(
+  dbTerms: DealTermsRow | null,
+  derived: ReturnType<typeof extractTermSheetSignals>,
+): DealTermsRow | null {
+  if (!dbTerms && derived.confidence === "low") return null;
+
+  return {
+    instrument_type: dbTerms?.instrument_type ?? null,
+    round_type: dbTerms?.round_type ?? null,
+    amount_raised: dbTerms?.amount_raised ?? null,
+    pre_money_valuation: dbTerms?.pre_money_valuation ?? null,
+    valuation_cap: dbTerms?.valuation_cap ?? derived.valuationCap,
+    discount_rate: dbTerms?.discount_rate ?? derived.discountRate,
+    interest_rate: dbTerms?.interest_rate ?? derived.interestRate,
+    maturity_date: dbTerms?.maturity_date ?? derived.maturityDate,
+    liquidation_preference_multiple:
+      dbTerms?.liquidation_preference_multiple ?? derived.liquidationPreferenceMultiple,
+    liquidation_participation:
+      dbTerms?.liquidation_participation ?? derived.liquidationParticipation,
+    pro_rata_rights: dbTerms?.pro_rata_rights ?? derived.proRataRights,
+    pro_rata_amount: dbTerms?.pro_rata_amount ?? null,
+    platform: dbTerms?.platform ?? null,
+    round_date: dbTerms?.round_date ?? null,
+    overfunding_ratio: dbTerms?.overfunding_ratio ?? null,
+    investor_count: dbTerms?.investor_count ?? null,
+    funding_velocity_days: dbTerms?.funding_velocity_days ?? null,
+    eis_seis_eligible: dbTerms?.eis_seis_eligible ?? null,
+    qsbs_eligible: dbTerms?.qsbs_eligible ?? null,
+    qualified_institutional: dbTerms?.qualified_institutional ?? null,
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -184,6 +226,7 @@ export async function POST(request: NextRequest) {
   let features: CompanyFeatures = {};
   let stageBucket: string | null = null;
   let dealTerms: DealTermsRow | null = null;
+  let mergedTerms: DealTermsRow | null = null;
   let fundingHistory: FundingRoundRow[] = [];
   let provenance: QuickScoreResponse["provenance"] = null;
   let regulatoryStatus: { companyStatus: string | null; companyNumber: string | null } | null = null;
@@ -302,6 +345,7 @@ export async function POST(request: NextRequest) {
   const mergedPitchText = [body.pitchText?.trim(), documentsText]
     .filter((v) => Boolean(v))
     .join("\n\n");
+  let analysisText = mergedPitchText;
 
   if (mergedPitchText && anthropicKey) {
     // Priority 1: user text and/or uploaded documents
@@ -326,6 +370,7 @@ export async function POST(request: NextRequest) {
       const scrapeResult = await scrapeWebsite(body.websiteUrl);
       if (scrapeResult.ok && scrapeResult.text) {
         dataSource = "website";
+        analysisText = scrapeResult.text;
         const profile = buildProfile({
           name: body.companyName,
           sector: body.sector,
@@ -351,6 +396,7 @@ export async function POST(request: NextRequest) {
           dataSource = "ai_knowledge";
           textResult = knowledgeResult;
           generatedProfile = knowledgeResult.generatedProfile;
+          analysisText = knowledgeResult.generatedProfile ?? "";
         }
       } catch {
         // All enrichment failed
@@ -366,6 +412,7 @@ export async function POST(request: NextRequest) {
         dataSource = "ai_knowledge";
         textResult = knowledgeResult;
         generatedProfile = knowledgeResult.generatedProfile;
+        analysisText = knowledgeResult.generatedProfile ?? "";
       }
     } catch {
       // Knowledge enrichment failed
@@ -374,6 +421,10 @@ export async function POST(request: NextRequest) {
 
   const textScores = textResult?.scores ?? null;
   const extractedFacts = textResult?.extractedFacts ?? null;
+  const derivedTermSignals = extractTermSheetSignals(
+    [analysisText, generatedProfile ?? ""].filter((v) => Boolean(v)).join("\n\n"),
+  );
+  mergedTerms = mergeDealTerms(dealTerms, derivedTermSignals);
 
   // Step 3b: Fill missing fields from extracted facts
   // Extracted facts only override when the user didn't provide a value
@@ -485,7 +536,7 @@ export async function POST(request: NextRequest) {
       country: (features.country as string) ?? company?.country ?? null,
       stageBucket,
       fundingTarget: (features.funding_target as number) ?? body.fundingTarget ?? null,
-      preMoneyValuation: dealTerms?.pre_money_valuation ?? null,
+      preMoneyValuation: mergedTerms?.pre_money_valuation ?? null,
       companyAge: (features.company_age_months as number) ?? null,
       revenue: effectiveRevenue,
       excludeCompanyId: company?.id ?? null,
@@ -518,15 +569,22 @@ export async function POST(request: NextRequest) {
     totalDebt: (features.total_debt as number) ?? null,
     cashPosition: (features.cash_position as number) ?? null,
     fundingTarget: (features.funding_target as number) ?? body.fundingTarget ?? null,
-    amountRaised: (features.amount_raised as number) ?? dealTerms?.amount_raised ?? null,
-    overfundingRatio: (features.overfunding_ratio as number) ?? dealTerms?.overfunding_ratio ?? null,
-    hasInstitutionalCoinvestor: Boolean(dealTerms?.qualified_institutional),
+    amountRaised: (features.amount_raised as number) ?? mergedTerms?.amount_raised ?? null,
+    overfundingRatio: (features.overfunding_ratio as number) ?? mergedTerms?.overfunding_ratio ?? null,
+    hasInstitutionalCoinvestor: Boolean(mergedTerms?.qualified_institutional),
     sector: body.sector ?? company?.sector ?? null,
     revenueGrowthYoy: extractedFacts?.revenueGrowthYoy ?? null,
-    preMoneyValuation: dealTerms?.pre_money_valuation ?? null,
-    instrumentType: dealTerms?.instrument_type ?? (features.instrument_type as string) ?? null,
-    investorCount: dealTerms?.investor_count ?? null,
-    fundingVelocityDays: dealTerms?.funding_velocity_days ?? null,
+    preMoneyValuation: mergedTerms?.pre_money_valuation ?? null,
+    valuationCap: mergedTerms?.valuation_cap ?? null,
+    discountRate: mergedTerms?.discount_rate ?? null,
+    interestRate: mergedTerms?.interest_rate ?? null,
+    maturityDate: mergedTerms?.maturity_date ?? null,
+    liquidationPreferenceMultiple: mergedTerms?.liquidation_preference_multiple ?? null,
+    liquidationParticipation: mergedTerms?.liquidation_participation ?? null,
+    proRataRights: mergedTerms?.pro_rata_rights ?? null,
+    instrumentType: mergedTerms?.instrument_type ?? (features.instrument_type as string) ?? null,
+    investorCount: mergedTerms?.investor_count ?? null,
+    fundingVelocityDays: mergedTerms?.funding_velocity_days ?? null,
     valuationContext: comparables?.valuationContext
       ? {
           valuationPercentile: comparables.valuationContext.valuationPercentile,
@@ -547,7 +605,7 @@ export async function POST(request: NextRequest) {
     ?? "No valuation context was available from current comparables.";
   const valuationScenario = computeValuationScenario({
     stageBucket,
-    preMoneyValuation: dealTerms?.pre_money_valuation ?? null,
+    preMoneyValuation: mergedTerms?.pre_money_valuation ?? null,
     revenue: effectiveRevenue,
     valuationSignal: comparables?.valuationContext?.signal ?? null,
     cohortMedianMultiple: comparables?.valuationContext?.cohortMedianMultiple ?? null,
@@ -605,6 +663,19 @@ export async function POST(request: NextRequest) {
 
   // Step 8: IC Memo generation + missing fields analysis
   const failedGates = gates.filter((g) => !g.passed);
+  const memoFeatures: Record<string, number | string | null> = {
+    ...(features as Record<string, number | string | null>),
+    valuation_cap: mergedTerms?.valuation_cap ?? null,
+    discount_rate: mergedTerms?.discount_rate ?? null,
+    interest_rate: mergedTerms?.interest_rate ?? null,
+    maturity_date: mergedTerms?.maturity_date ?? null,
+    liquidation_preference_multiple: mergedTerms?.liquidation_preference_multiple ?? null,
+    liquidation_participation: mergedTerms?.liquidation_participation ?? null,
+    pro_rata_rights:
+      mergedTerms?.pro_rata_rights === null || mergedTerms?.pro_rata_rights === undefined
+        ? null
+        : (mergedTerms.pro_rata_rights ? "true" : "false"),
+  };
   const memoInput = {
     companyName: body.companyName,
     sector: body.sector ?? null,
@@ -629,7 +700,9 @@ export async function POST(request: NextRequest) {
         )
       : null,
     extractedFacts: extractedFacts ?? null,
-    features: Object.keys(features).length > 0 ? (features as Record<string, number | string | null>) : null,
+    features: Object.values(memoFeatures).some((v) => v !== null && v !== undefined)
+      ? memoFeatures
+      : null,
     failedGates: failedGates.map((g) => ({ name: g.name, reason: g.reason })),
     dataSource,
     dataCompleteness: Math.round(rubricResult.dataCompleteness * 100),
@@ -681,6 +754,13 @@ export async function POST(request: NextRequest) {
     // Audit logging failures should not block scoring
   }
 
+  const trustSignals: QuickScoreResponse["trust"] = {
+    sourceTier: comparables?.valuationContext?.sourceTier ?? "unknown",
+    confidencePenalty: comparables?.sourceSummary.confidencePenalty ?? 0,
+    confidencePenaltyReasons: comparables?.sourceSummary.confidencePenaltyReasons ?? [],
+    abstainReasons: failedGates.map((g) => `${g.name}: ${g.reason}`),
+  };
+
   const response: QuickScoreResponse = {
     score: adjustedScore,
     confidenceRange: rubricResult.confidenceRange,
@@ -718,7 +798,7 @@ export async function POST(request: NextRequest) {
     memo,
     missingFields,
     comparables,
-    dealTerms,
+    dealTerms: mergedTerms,
     fundingHistory,
     assessmentWarning,
     documentSummary: {
@@ -738,6 +818,7 @@ export async function POST(request: NextRequest) {
       usedThisMonth: usageGate.used + 1,
       remaining: Math.max(0, usageGate.limit - (usageGate.used + 1)),
     },
+    trust: trustSignals,
   };
 
   void recordUsageEvent(supabase, context.actorEmail, "quick_score", 1, {

@@ -62,6 +62,14 @@ type ScoreResponse = {
     round_type: string | null;
     amount_raised: number | null;
     pre_money_valuation: number | null;
+    valuation_cap: number | null;
+    discount_rate: number | null;
+    interest_rate: number | null;
+    maturity_date: string | null;
+    liquidation_preference_multiple: number | null;
+    liquidation_participation: string | null;
+    pro_rata_rights: boolean | null;
+    pro_rata_amount: number | null;
     platform: string | null;
     round_date: string | null;
     overfunding_ratio: number | null;
@@ -77,6 +85,14 @@ type ScoreResponse = {
     round_type: string | null;
     amount_raised: number | null;
     pre_money_valuation: number | null;
+    valuation_cap: number | null;
+    discount_rate: number | null;
+    interest_rate: number | null;
+    maturity_date: string | null;
+    liquidation_preference_multiple: number | null;
+    liquidation_participation: string | null;
+    pro_rata_rights: boolean | null;
+    pro_rata_amount: number | null;
     platform: string | null;
     round_date: string | null;
     overfunding_ratio: number | null;
@@ -190,6 +206,12 @@ type ScoreResponse = {
       campaignDate: string | null;
     }>;
   } | null;
+  trust: {
+    sourceTier: "A" | "B" | "C" | "unknown";
+    confidencePenalty: number;
+    confidencePenaltyReasons: string[];
+    abstainReasons: string[];
+  };
 };
 
 export default function Home() {

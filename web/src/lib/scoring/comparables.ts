@@ -467,9 +467,7 @@ async function queryPricingFromTrainingFeatures(
 ): Promise<PricingCohortRow[]> {
   let query = supabase
     .from("training_features_wide")
-    .select("entity_id, sector, country, pre_money_valuation, revenue_at_raise, amount_raised")
-    .not("pre_money_valuation", "is", null)
-    .gt("pre_money_valuation", 0)
+    .select("entity_id, sector, country, pre_money_valuation, valuation_cap, revenue_at_raise, amount_raised")
     .order("as_of_date", { ascending: false })
     .limit(limit);
 
@@ -479,17 +477,28 @@ async function queryPricingFromTrainingFeatures(
   const { data, error } = await query;
   if (error || !data) return [];
 
-  return (data as Record<string, unknown>[]).map((r) => ({
-    key: `tfw:${String(r.entity_id)}`,
-    sector: r.sector as string | null,
-    country: r.country as string | null,
-    pre_money_valuation: r.pre_money_valuation as number | null,
-    revenue_at_raise: r.revenue_at_raise as number | null,
-    amount_raised: r.amount_raised as number | null,
-    source: "training_features",
-    sourceTier: "B",
-    sourceTierWeight: SOURCE_TIER_WEIGHT.B,
-  }));
+  const out: PricingCohortRow[] = [];
+  for (const r of data as Record<string, unknown>[]) {
+    const preMoney = r.pre_money_valuation as number | null;
+    const valuationCap = r.valuation_cap as number | null;
+    const effectivePreMoney = preMoney && preMoney > 0 ? preMoney : valuationCap;
+    if (!effectivePreMoney || effectivePreMoney <= 0) continue;
+
+    const capProxy = !preMoney && Boolean(valuationCap && valuationCap > 0);
+    const sourceTier: "B" | "C" = capProxy ? "C" : "B";
+    out.push({
+      key: `tfw:${String(r.entity_id)}:${capProxy ? "cap" : "pre"}`,
+      sector: r.sector as string | null,
+      country: r.country as string | null,
+      pre_money_valuation: effectivePreMoney,
+      revenue_at_raise: r.revenue_at_raise as number | null,
+      amount_raised: r.amount_raised as number | null,
+      source: capProxy ? "training_features:valuation_cap_proxy" : "training_features",
+      sourceTier,
+      sourceTierWeight: SOURCE_TIER_WEIGHT[sourceTier],
+    });
+  }
+  return out;
 }
 
 async function queryPricingFromFundingRounds(
@@ -499,9 +508,7 @@ async function queryPricingFromFundingRounds(
 ): Promise<PricingCohortRow[]> {
   const { data, error } = await supabase
     .from("funding_rounds")
-    .select("id, company_id, pre_money_valuation, amount_raised, source, companies!inner(id, sector, country, source)")
-    .not("pre_money_valuation", "is", null)
-    .gt("pre_money_valuation", 0)
+    .select("id, company_id, pre_money_valuation, valuation_cap, amount_raised, source, companies!inner(id, sector, country, source)")
     .order("round_date", { ascending: false })
     .limit(limit);
 
@@ -562,7 +569,8 @@ async function queryPricingFromFundingRounds(
     }
   }
 
-  return candidateRounds.map((r) => {
+  const out: PricingCohortRow[] = [];
+  for (const r of candidateRounds) {
     const company = r.companies as { source?: string | null; sector?: string | null; country?: string | null } | null;
     const companySource = (company?.source ?? "unknown").toLowerCase();
     const sourceTier = tierForCompanySource(companySource);
@@ -570,18 +578,26 @@ async function queryPricingFromFundingRounds(
     const companyId = r.company_id as string | null;
     const roundSource = (r.source as string | null) ?? companySource;
 
-    return {
+    const preMoney = r.pre_money_valuation as number | null;
+    const valuationCap = r.valuation_cap as number | null;
+    const effectivePreMoney = preMoney && preMoney > 0 ? preMoney : valuationCap;
+    if (!effectivePreMoney || effectivePreMoney <= 0) continue;
+    const capProxy = !preMoney && Boolean(valuationCap && valuationCap > 0);
+    const effectiveTier = capProxy ? "C" : sourceTier;
+
+    out.push({
       key: `round:${String(r.id)}`,
       sector: company?.sector ?? null,
       country: company?.country ?? null,
-      pre_money_valuation: r.pre_money_valuation as number | null,
+      pre_money_valuation: effectivePreMoney,
       revenue_at_raise: companyId ? (revenueByCompany.get(companyId) ?? null) : null,
       amount_raised: r.amount_raised as number | null,
-      source: `funding_rounds:${roundSource}`,
-      sourceTier,
-      sourceTierWeight: SOURCE_TIER_WEIGHT[sourceTier],
-    };
-  });
+      source: capProxy ? `funding_rounds:${roundSource}:valuation_cap_proxy` : `funding_rounds:${roundSource}`,
+      sourceTier: effectiveTier,
+      sourceTierWeight: SOURCE_TIER_WEIGHT[effectiveTier],
+    });
+  }
+  return out;
 }
 
 async function queryPricingFromCrowdfundingOutcomes(

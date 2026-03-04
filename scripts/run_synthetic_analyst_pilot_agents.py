@@ -154,6 +154,22 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _normalize_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for entry in value:
+            text = str(entry).strip()
+            if text:
+                out.append(text)
+        return out[:8]
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    return []
+
+
 def _compute_data_sufficiency(item: dict[str, Any]) -> dict[str, Any]:
     """Compute evidence-quality score and missing contract fields."""
     identity_fields = {
@@ -1232,6 +1248,7 @@ async def _ask_persona_async(
         raise ValueError("Claude response parsing failed.") from last_error
 
     rec = str(parsed.get("recommendation_class", "abstain")).strip().lower()
+    invalid_recommendation = rec not in RECOMMENDATIONS
     if rec not in RECOMMENDATIONS:
         rec = "abstain"
 
@@ -1254,14 +1271,18 @@ async def _ask_persona_async(
             conviction = fallback_conviction
         parsed["fallback_from_abstain"] = True
         is_fallback = True
-        fallback_reason = "abstain_with_actionable_context"
+        fallback_reason = (
+            "invalid_recommendation"
+            if invalid_recommendation
+            else "abstain_with_actionable_context"
+        )
 
     return {
         "recommendation_class": rec,
         "conviction": conviction,
         "rationale": str(parsed.get("rationale", "No rationale provided")).strip(),
-        "key_risks": parsed.get("key_risks") or [],
-        "data_gaps": parsed.get("data_gaps") or [],
+        "key_risks": _normalize_string_list(parsed.get("key_risks")),
+        "data_gaps": _normalize_string_list(parsed.get("data_gaps")),
         "raw": parsed,
         "is_fallback": is_fallback,
         "fallback_reason": fallback_reason,
@@ -1296,6 +1317,11 @@ async def _run_agent(
                 persona=persona["id"],
                 error=str(exc),
             )
+            fallback_reason = (
+                "parse_error"
+                if isinstance(exc, ValueError)
+                else "api_error"
+            )
             result = {
                 "recommendation_class": "abstain",
                 "conviction": 0,
@@ -1304,7 +1330,7 @@ async def _run_agent(
                 "data_gaps": ["claude_response_unavailable"],
                 "raw": {"error": str(exc)},
                 "is_fallback": False,
-                "fallback_reason": "api_error",
+                "fallback_reason": fallback_reason,
             }
             agent_state.errors += 1
 
@@ -1410,6 +1436,9 @@ def _aggregate(
     non_fallback_count = total_decisions - fallback_count
     fallback_rate = round(fallback_count / total_decisions, 4) if total_decisions else 0.0
     non_fallback_rate = round(non_fallback_count / total_decisions, 4) if total_decisions else 0.0
+    fallback_reason_distribution = dict(
+        Counter(d.fallback_reason for d in all_decisions if d.fallback_reason)
+    )
 
     # Model alignment coverage: fraction of items with a non-null model recommendation
     items_with_model = sum(
@@ -1439,6 +1468,7 @@ def _aggregate(
         "fallbackRate": fallback_rate,
         "nonFallbackRate": non_fallback_rate,
         "nonFallbackDecisionCount": non_fallback_count,
+        "fallbackReasonDistribution": fallback_reason_distribution,
         "modelAlignmentCoverage": model_alignment_coverage,
         "executionMode": "parallel_async_agents",
         "agentCount": len(agent_states),
@@ -1471,6 +1501,7 @@ def _write_report(summary: dict[str, Any], output_dir: Path) -> tuple[Path, Path
         f"- Errors: {summary['totalErrors']}",
         f"- Disagreement rate: {summary['disagreementRate']}",
         f"- Model-majority alignment rate: {summary['modelMajorityAlignmentRate']}",
+        f"- Fallback rate: {summary.get('fallbackRate', 0)}",
         "",
         "## Majority Recommendation Distribution",
         "",
@@ -1487,6 +1518,13 @@ def _write_report(summary: dict[str, Any], output_dir: Path) -> tuple[Path, Path
         md_lines.append(f"### {agent_id}")
         for k, v in dist.items():
             md_lines.append(f"- {k}: {v}")
+        md_lines.append("")
+
+    fallback_reasons = summary.get("fallbackReasonDistribution", {})
+    if fallback_reasons:
+        md_lines.extend(["## Fallback Reasons", ""])
+        for reason, count in fallback_reasons.items():
+            md_lines.append(f"- {reason}: {count}")
         md_lines.append("")
 
     md_path.write_text("\n".join(md_lines), encoding="utf-8")

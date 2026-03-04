@@ -3,7 +3,7 @@ import test from "node:test";
 
 import * as XLSX from "xlsx";
 
-import { ingestDocuments } from "./document-ingestion";
+import { extractTermSheetSignals, ingestDocuments } from "./document-ingestion";
 
 function toB64(input: string | Uint8Array): string {
   if (typeof input === "string") {
@@ -74,4 +74,26 @@ test("ingestDocuments keeps pdf docs for native Claude processing", async () => 
   assert.equal(result.pdfDocuments.length, 1);
   assert.equal(result.pdfDocuments[0].name, "deck.pdf");
   assert.equal(result.parsedDocuments[0].extractedChars, 0);
+});
+
+test("extractTermSheetSignals parses core convertible term fields", () => {
+  const text = `
+    Instrument: SAFE with valuation cap $8m and 20% discount.
+    Liquidation preference: 1x non-participating.
+    Includes pro rata rights for major investors.
+  `;
+  const parsed = extractTermSheetSignals(text);
+  assert.equal(parsed.valuationCap, 8_000_000);
+  assert.equal(parsed.discountRate, 0.2);
+  assert.equal(parsed.liquidationPreferenceMultiple, 1);
+  assert.equal(parsed.liquidationParticipation, "non_participating");
+  assert.equal(parsed.proRataRights, true);
+  assert.equal(parsed.confidence, "high");
+});
+
+test("extractTermSheetSignals handles sparse text safely", () => {
+  const parsed = extractTermSheetSignals("General company overview without legal terms.");
+  assert.equal(parsed.valuationCap, null);
+  assert.equal(parsed.discountRate, null);
+  assert.equal(parsed.confidence, "low");
 });

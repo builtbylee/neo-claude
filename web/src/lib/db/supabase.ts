@@ -85,6 +85,14 @@ export interface DealTermsRow {
   round_type: string | null;
   amount_raised: number | null;
   pre_money_valuation: number | null;
+  valuation_cap: number | null;
+  discount_rate: number | null;
+  interest_rate: number | null;
+  maturity_date: string | null;
+  liquidation_preference_multiple: number | null;
+  liquidation_participation: string | null;
+  pro_rata_rights: boolean | null;
+  pro_rata_amount: number | null;
   platform: string | null;
   round_date: string | null;
   overfunding_ratio: number | null;
@@ -109,7 +117,7 @@ export async function loadDealTerms(
   const { data } = await supabase
     .from("funding_rounds")
     .select(
-      "instrument_type, round_type, amount_raised, pre_money_valuation, platform, round_date, overfunding_ratio, investor_count, funding_velocity_days, eis_seis_eligible, qsbs_eligible, qualified_institutional",
+      "instrument_type, round_type, amount_raised, pre_money_valuation, valuation_cap, discount_rate, interest_rate, maturity_date, liquidation_preference_multiple, liquidation_participation, pro_rata_rights, pro_rata_amount, platform, round_date, overfunding_ratio, investor_count, funding_velocity_days, eis_seis_eligible, qsbs_eligible, qualified_institutional",
     )
     .eq("company_id", companyId)
     .order("round_date", { ascending: false })
@@ -130,7 +138,7 @@ export async function loadFundingHistory(
   const { data } = await supabase
     .from("funding_rounds")
     .select(
-      "id, instrument_type, round_type, amount_raised, pre_money_valuation, platform, round_date, overfunding_ratio, investor_count, funding_velocity_days, eis_seis_eligible, qsbs_eligible, qualified_institutional",
+      "id, instrument_type, round_type, amount_raised, pre_money_valuation, valuation_cap, discount_rate, interest_rate, maturity_date, liquidation_preference_multiple, liquidation_participation, pro_rata_rights, pro_rata_amount, platform, round_date, overfunding_ratio, investor_count, funding_velocity_days, eis_seis_eligible, qsbs_eligible, qualified_institutional",
     )
     .eq("company_id", companyId)
     .order("round_date", { ascending: false })
