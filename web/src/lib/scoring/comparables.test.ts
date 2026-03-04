@@ -194,6 +194,7 @@ test("findComparables applies source-tier confidence penalties", async () => {
     key: `pricing-${i}`,
     sector: "Fintech",
     country: "UK",
+    stageBucket: "seed",
     pre_money_valuation: 6_000_000 + i * 10_000,
     revenue_at_raise: null,
     amount_raised: 200_000 + i * 100,
@@ -221,6 +222,7 @@ test("findComparables applies source-tier confidence penalties", async () => {
   assert.ok(result);
   assert.equal(result.valuationContext?.multipleType, "raise_proxy_multiple");
   assert.equal(result.sourceSummary.pricingTierBreakdown.C, 140);
+  assert.equal(result.sourceSummary.pricingStageAlignedSample, 140);
   assert.equal(result.valuationConfidence, "low");
   assert.ok(result.sourceSummary.confidencePenalty > 0);
   assert.ok(result.sourceSummary.confidencePenaltyReasons.length > 0);

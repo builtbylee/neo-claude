@@ -39,6 +39,7 @@ import { checkGates, type GateCheckInput } from "@/lib/scoring/gates";
 import { classify } from "@/lib/scoring/recommendation";
 import { type RubricInput, computeRubric } from "@/lib/scoring/rubric";
 import { deriveSegmentKey } from "@/lib/scoring/segments";
+import { auditTermSignals, computeAnalystReadiness } from "@/lib/scoring/trust";
 import { computeValuationScenario } from "@/lib/scoring/valuation";
 import modelJson from "@/../public/model/model.json";
 
@@ -154,6 +155,15 @@ interface QuickScoreResponse {
     confidencePenalty: number;
     confidencePenaltyReasons: string[];
     abstainReasons: string[];
+    termFieldSources: Record<string, string>;
+    termConflicts: string[];
+    analystReadiness: {
+      status: "ready" | "caution" | "blocked";
+      passedCriteria: number;
+      totalCriteria: number;
+      reasons: string[];
+    };
+    operationalWarnings: string[];
   };
 }
 
@@ -227,6 +237,7 @@ export async function POST(request: NextRequest) {
   let stageBucket: string | null = null;
   let dealTerms: DealTermsRow | null = null;
   let mergedTerms: DealTermsRow | null = null;
+  let modelPFail: number | null = null;
   let fundingHistory: FundingRoundRow[] = [];
   let provenance: QuickScoreResponse["provenance"] = null;
   let regulatoryStatus: { companyStatus: string | null; companyNumber: string | null } | null = null;
@@ -240,6 +251,7 @@ export async function POST(request: NextRequest) {
     matchName: null,
     reason: "Sanctions check not run.",
   };
+  const operationalWarnings: string[] = [];
 
   {
     company = await findCompany(supabase, body.companyName);
@@ -249,6 +261,7 @@ export async function POST(request: NextRequest) {
         dealTerms = await loadDealTerms(supabase, company.id);
         fundingHistory = await loadFundingHistory(supabase, company.id);
       } catch {
+        operationalWarnings.push("Deal terms could not be loaded from funding history.");
         // Deal terms query failed — continue without
       }
     }
@@ -264,6 +277,7 @@ export async function POST(request: NextRequest) {
           };
         }
       } catch {
+        operationalWarnings.push("Regulatory status lookup failed for matched entity.");
         // Regulatory query failed — continue without
       }
 
@@ -322,6 +336,7 @@ export async function POST(request: NextRequest) {
           };
         }
       } catch {
+        operationalWarnings.push("Feature provenance lookup failed.");
         // Provenance query failed — continue without
       }
     }
@@ -424,6 +439,7 @@ export async function POST(request: NextRequest) {
   const derivedTermSignals = extractTermSheetSignals(
     [analysisText, generatedProfile ?? ""].filter((v) => Boolean(v)).join("\n\n"),
   );
+  const termAudit = auditTermSignals(dealTerms, derivedTermSignals);
   mergedTerms = mergeDealTerms(dealTerms, derivedTermSignals);
 
   // Step 3b: Fill missing fields from extracted facts
@@ -448,7 +464,9 @@ export async function POST(request: NextRequest) {
   try {
     const result = predict(MODEL, features);
     mlScore = result.score;
+    modelPFail = result.pFail;
   } catch {
+    operationalWarnings.push("ML inference failed; baseline score used.");
     // Model inference failed — use baseline
   }
 
@@ -478,6 +496,7 @@ export async function POST(request: NextRequest) {
       };
     }
   } catch {
+    operationalWarnings.push("Segment evidence lookup failed.");
     // Segment evidence unavailable — gate will abstain
   }
 
@@ -494,6 +513,7 @@ export async function POST(request: NextRequest) {
       };
     }
   } catch {
+    operationalWarnings.push("Quarterly evidence lookup failed.");
     // Quarterly evidence unavailable — gate will abstain
   }
 
@@ -505,7 +525,7 @@ export async function POST(request: NextRequest) {
         normalized_name: body.companyName
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, " ")
-          .replace(/\\s+/g, " ")
+          .replace(/\s+/g, " ")
           .trim(),
         matched: sanctions.matched,
         match_source: sanctions.matchSource,
@@ -514,6 +534,7 @@ export async function POST(request: NextRequest) {
         details: { reason: sanctions.reason },
       });
     } catch {
+      operationalWarnings.push("Sanctions screening call failed.");
       // Screening errors should not break scoring
     }
   } else {
@@ -545,6 +566,7 @@ export async function POST(request: NextRequest) {
       maxRows: 900,
     });
   } catch {
+    operationalWarnings.push("Comparables query failed; valuation context degraded.");
     // Comparables query failed — continue without it
   }
 
@@ -597,7 +619,12 @@ export async function POST(request: NextRequest) {
 
   const rubricResult = computeRubric(rubricInput);
   const confidencePenalty = comparables?.sourceSummary.confidencePenalty ?? 0;
-  const confidencePenaltyPoints = Math.min(12, confidencePenalty * 4);
+  const combinedPenalty = confidencePenalty + termAudit.confidencePenalty;
+  const combinedPenaltyReasons = [
+    ...(comparables?.sourceSummary.confidencePenaltyReasons ?? []),
+    ...termAudit.confidencePenaltyReasons,
+  ];
+  const confidencePenaltyPoints = Math.min(16, combinedPenalty * 4);
   const adjustedScore = Math.max(0, rubricResult.overallScore - confidencePenaltyPoints);
   const valuationConfidence = comparables?.valuationConfidence ?? "low";
   const valuationConfidenceReason =
@@ -616,6 +643,7 @@ export async function POST(request: NextRequest) {
   const gateInput: GateCheckInput = {
     dataCompleteness: rubricResult.dataCompleteness,
     modelScore: adjustedScore,
+    modelPFail,
     confidenceRange: rubricResult.confidenceRange,
     isQuickScore: true,
     valuationConfidence,
@@ -636,6 +664,7 @@ export async function POST(request: NextRequest) {
         }
       : null,
     sanctionsMatch: sanctions.matched,
+    termConflictCount: termAudit.conflicts.length,
   };
 
   const gates = checkGates(gateInput);
@@ -726,6 +755,7 @@ export async function POST(request: NextRequest) {
     try {
       memo = await generateMemo(anthropicKey, memoInput);
     } catch {
+      operationalWarnings.push("Memo generation failed; returning structured score only.");
       // Memo generation failed — continue without it
     }
   }
@@ -754,11 +784,35 @@ export async function POST(request: NextRequest) {
     // Audit logging failures should not block scoring
   }
 
+  const failedGateCount = failedGates.length;
+  const readiness = computeAnalystReadiness({
+    dataCompleteness: rubricResult.dataCompleteness,
+    failedGateCount,
+    valuationConfidence,
+    segmentEvidenceOk: Boolean(segmentEvidence?.evidenceOk),
+    quarterlyEvidenceOk: Boolean(
+      quarterlyEvidence?.releaseReadiness && quarterlyEvidence?.isFresh,
+    ),
+    sourceTier: comparables?.valuationContext?.sourceTier ?? "unknown",
+    pricingSampleSize: comparables?.sourceSummary.pricingSampleSize ?? 0,
+    pricingTierBreakdown: comparables?.sourceSummary.pricingTierBreakdown ?? {
+      A: 0,
+      B: 0,
+      C: 0,
+    },
+    termConflictCount: termAudit.conflicts.length,
+    operationalWarningCount: operationalWarnings.length,
+  });
+
   const trustSignals: QuickScoreResponse["trust"] = {
     sourceTier: comparables?.valuationContext?.sourceTier ?? "unknown",
-    confidencePenalty: comparables?.sourceSummary.confidencePenalty ?? 0,
-    confidencePenaltyReasons: comparables?.sourceSummary.confidencePenaltyReasons ?? [],
+    confidencePenalty: combinedPenalty,
+    confidencePenaltyReasons: combinedPenaltyReasons,
     abstainReasons: failedGates.map((g) => `${g.name}: ${g.reason}`),
+    termFieldSources: termAudit.fieldSources,
+    termConflicts: termAudit.conflicts,
+    analystReadiness: readiness,
+    operationalWarnings,
   };
 
   const response: QuickScoreResponse = {

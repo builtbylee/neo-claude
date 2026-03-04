@@ -53,6 +53,83 @@ def _evidence_rank(item: dict[str, Any]) -> tuple[float, float, int]:
     return (score, float(cats), has_model)
 
 
+def _select_diverse_items(items: list[dict[str, Any]], top_n: int) -> list[dict[str, Any]]:
+    """Select highest-evidence items while preserving class/sector diversity."""
+    if not items or top_n <= 0:
+        return []
+
+    ranked = sorted(items, key=_evidence_rank, reverse=True)
+    selected: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_classes: set[str] = set()
+    seen_sectors: set[str] = set()
+    seen_countries: set[str] = set()
+
+    by_class: dict[str, list[dict[str, Any]]] = {}
+    for item in ranked:
+        klass = str(item.get("model_recommendation") or "unknown").lower()
+        by_class.setdefault(klass, []).append(item)
+
+    # Pass 1: one top candidate per class (best evidence first).
+    class_heads = sorted(
+        (bucket[0] for bucket in by_class.values() if bucket),
+        key=_evidence_rank,
+        reverse=True,
+    )
+    for candidate in class_heads:
+        if len(selected) >= top_n:
+            break
+        item_id = str(candidate.get("shadow_cycle_item_id"))
+        if item_id in seen_ids:
+            continue
+        selected.append(candidate)
+        seen_ids.add(item_id)
+        seen_classes.add(str(candidate.get("model_recommendation") or "unknown").lower())
+        if candidate.get("sector"):
+            seen_sectors.add(str(candidate.get("sector")).lower())
+        if candidate.get("country"):
+            seen_countries.add(str(candidate.get("country")).lower())
+
+    # Pass 2: fill by evidence rank with diversity bonus.
+    while len(selected) < top_n:
+        best: dict[str, Any] | None = None
+        best_score: tuple[float, float, int] | None = None
+        for candidate in ranked:
+            item_id = str(candidate.get("shadow_cycle_item_id"))
+            if item_id in seen_ids:
+                continue
+            klass = str(candidate.get("model_recommendation") or "unknown").lower()
+            sector = str(candidate.get("sector") or "").lower()
+            country = str(candidate.get("country") or "").lower()
+            diversity_bonus = 0
+            if klass and klass not in seen_classes:
+                diversity_bonus += 3
+            if sector and sector not in seen_sectors:
+                diversity_bonus += 2
+            if country and country not in seen_countries:
+                diversity_bonus += 1
+            evidence = _evidence_rank(candidate)
+            candidate_score = (
+                evidence[0] + diversity_bonus,
+                evidence[1],
+                evidence[2],
+            )
+            if best is None or candidate_score > best_score:
+                best = candidate
+                best_score = candidate_score
+        if best is None:
+            break
+        selected.append(best)
+        seen_ids.add(str(best.get("shadow_cycle_item_id")))
+        seen_classes.add(str(best.get("model_recommendation") or "unknown").lower())
+        if best.get("sector"):
+            seen_sectors.add(str(best.get("sector")).lower())
+        if best.get("country"):
+            seen_countries.add(str(best.get("country")).lower())
+
+    return selected
+
+
 def _memo_markdown(item: dict[str, Any]) -> str:
     suff = item.get("data_sufficiency", {})
     score = item.get("score")
@@ -171,8 +248,7 @@ def main(
         if not eligible:
             raise typer.BadParameter("No demo-eligible items after evidence filters.")
 
-        eligible.sort(key=_evidence_rank, reverse=True)
-        selected = eligible[:top_n]
+        selected = _select_diverse_items(eligible, top_n)
 
         base = Path(output_dir) / f"{cycle['cycle_name']}_{datetime.now(UTC).date().isoformat()}"
         base.mkdir(parents=True, exist_ok=True)
@@ -204,6 +280,15 @@ def main(
             "cycle_name": cycle["cycle_name"],
             "generated_at": datetime.now(UTC).isoformat(),
             "selected_count": len(selected),
+            "recommendation_class_coverage": len(
+                {str(item.get("model_recommendation") or "unknown").lower() for item in selected}
+            ),
+            "sector_coverage": len(
+                {str(item.get("sector") or "").lower() for item in selected if item.get("sector")}
+            ),
+            "country_coverage": len(
+                {str(item.get("country") or "").lower() for item in selected if item.get("country")}
+            ),
             "item_ids_file": str(items_file),
             "items": manifest_items,
         }

@@ -178,6 +178,7 @@ interface ScoreResultProps {
         pricingSampleSize: number;
         pricingRevenueSampleSize: number;
         pricingProxySampleSize: number;
+        pricingStageAlignedSample: number;
         pricingSourceBreakdown: Record<string, number>;
         pricingTierBreakdown: Record<"A" | "B" | "C", number>;
         weightedPricingCoverage: number;
@@ -204,6 +205,15 @@ interface ScoreResultProps {
       confidencePenalty: number;
       confidencePenaltyReasons: string[];
       abstainReasons: string[];
+      termFieldSources: Record<string, string>;
+      termConflicts: string[];
+      analystReadiness: {
+        status: "ready" | "caution" | "blocked";
+        passedCriteria: number;
+        totalCriteria: number;
+        reasons: string[];
+      };
+      operationalWarnings: string[];
     };
   };
 }
@@ -396,6 +406,7 @@ export default function ScoreResult({ result }: ScoreResultProps) {
               Pricing comps: {result.comparables.sourceSummary.pricingSampleSize} rows
               {" · "}revenue-linked {result.comparables.sourceSummary.pricingRevenueSampleSize}
               {" · "}proxy {result.comparables.sourceSummary.pricingProxySampleSize}
+              {" · "}stage-aligned {result.comparables.sourceSummary.pricingStageAlignedSample}
             </div>
           )}
           {result.sanctions.checked && (
@@ -418,6 +429,23 @@ export default function ScoreResult({ result }: ScoreResultProps) {
         </h3>
         <div className="text-xs text-neutral-400 space-y-1.5">
           <div>
+            Analyst readiness:{" "}
+            <span
+              className={
+                result.trust.analystReadiness.status === "ready"
+                  ? "text-green-300 font-medium"
+                  : result.trust.analystReadiness.status === "caution"
+                    ? "text-yellow-300 font-medium"
+                    : "text-amber-300 font-medium"
+              }
+            >
+              {result.trust.analystReadiness.status}
+            </span>
+            {" · "}
+            {result.trust.analystReadiness.passedCriteria}/
+            {result.trust.analystReadiness.totalCriteria} checks
+          </div>
+          <div>
             Source tier:{" "}
             <span className="text-neutral-200 font-medium">{result.trust.sourceTier}</span>
           </div>
@@ -437,6 +465,35 @@ export default function ScoreResult({ result }: ScoreResultProps) {
                 {result.trust.abstainReasons.map((reason, idx) => (
                   <li key={`${reason}-${idx}`} className="text-neutral-300">
                     - {reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {result.trust.termConflicts.length > 0 && (
+            <div className="text-amber-300">
+              Term conflicts: {result.trust.termConflicts.join(", ")}
+            </div>
+          )}
+          {result.trust.analystReadiness.reasons.length > 0 && (
+            <div>
+              Readiness blockers:
+              <ul className="mt-1 space-y-1">
+                {result.trust.analystReadiness.reasons.map((reason, idx) => (
+                  <li key={`${reason}-${idx}`} className="text-neutral-300">
+                    - {reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {result.trust.operationalWarnings.length > 0 && (
+            <div>
+              Operational warnings:
+              <ul className="mt-1 space-y-1">
+                {result.trust.operationalWarnings.map((warning, idx) => (
+                  <li key={`${warning}-${idx}`} className="text-neutral-300">
+                    - {warning}
                   </li>
                 ))}
               </ul>

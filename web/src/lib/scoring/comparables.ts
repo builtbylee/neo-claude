@@ -61,6 +61,7 @@ export interface ComparablesResult {
     pricingSampleSize: number;
     pricingRevenueSampleSize: number;
     pricingProxySampleSize: number;
+    pricingStageAlignedSample: number;
     pricingSourceBreakdown: Record<string, number>;
     pricingTierBreakdown: Record<"A" | "B" | "C", number>;
     weightedPricingCoverage: number;
@@ -95,6 +96,7 @@ interface PricingCohortRow {
   key: string;
   sector: string | null;
   country: string | null;
+  stageBucket: string | null;
   pre_money_valuation: number | null;
   revenue_at_raise: number | null;
   amount_raised: number | null;
@@ -140,6 +142,18 @@ function downgradeConfidence(value: "low" | "medium" | "high"): "low" | "medium"
   if (value === "high") return "medium";
   if (value === "medium") return "low";
   return "low";
+}
+
+function normalizeStageBucket(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const lower = value.toLowerCase();
+  if (lower.includes("seed")) return "seed";
+  if (lower.includes("early")) return "early_growth";
+  if (lower.includes("series a")) return "early_growth";
+  if (lower.includes("series b")) return "early_growth";
+  if (lower.includes("a") && lower.includes("series")) return "early_growth";
+  if (lower.includes("b") && lower.includes("series")) return "early_growth";
+  return null;
 }
 
 function median(values: number[]): number | null {
@@ -332,6 +346,7 @@ function inferValuationConfidence(input: {
   sourceConfidence: "low" | "medium" | "high";
   pricingRevenueSampleSize: number;
   pricingProxySampleSize: number;
+  pricingStageAlignedSample: number;
   tierBreakdown: Record<"A" | "B" | "C", number>;
   weightedCoverage: number;
 }): {
@@ -397,6 +412,11 @@ function inferValuationConfidence(input: {
     confidence = downgradeConfidence(confidence);
     penalty += 1;
     penaltyReasons.push("Valuation relies heavily on proxy multiples.");
+  }
+  if (input.pricingStageAlignedSample > 0 && input.pricingStageAlignedSample < 60) {
+    confidence = downgradeConfidence(confidence);
+    penalty += 1;
+    penaltyReasons.push("Stage-aligned pricing sample is limited (<60 rows).");
   }
 
   return {
@@ -467,12 +487,13 @@ async function queryPricingFromTrainingFeatures(
 ): Promise<PricingCohortRow[]> {
   let query = supabase
     .from("training_features_wide")
-    .select("entity_id, sector, country, pre_money_valuation, valuation_cap, revenue_at_raise, amount_raised")
+    .select("entity_id, sector, country, stage_bucket, pre_money_valuation, valuation_cap, revenue_at_raise, amount_raised")
     .order("as_of_date", { ascending: false })
     .limit(limit);
 
   if (filters.sector) query = query.eq("sector", filters.sector);
   if (filters.country) query = query.eq("country", filters.country);
+  if (filters.stageBucket) query = query.eq("stage_bucket", filters.stageBucket);
 
   const { data, error } = await query;
   if (error || !data) return [];
@@ -490,6 +511,7 @@ async function queryPricingFromTrainingFeatures(
       key: `tfw:${String(r.entity_id)}:${capProxy ? "cap" : "pre"}`,
       sector: r.sector as string | null,
       country: r.country as string | null,
+      stageBucket: normalizeStageBucket(r.stage_bucket as string | null),
       pre_money_valuation: effectivePreMoney,
       revenue_at_raise: r.revenue_at_raise as number | null,
       amount_raised: r.amount_raised as number | null,
@@ -508,7 +530,7 @@ async function queryPricingFromFundingRounds(
 ): Promise<PricingCohortRow[]> {
   const { data, error } = await supabase
     .from("funding_rounds")
-    .select("id, company_id, pre_money_valuation, valuation_cap, amount_raised, source, companies!inner(id, sector, country, source)")
+    .select("id, company_id, round_type, pre_money_valuation, valuation_cap, amount_raised, source, companies!inner(id, sector, country, source)")
     .order("round_date", { ascending: false })
     .limit(limit);
 
@@ -518,6 +540,10 @@ async function queryPricingFromFundingRounds(
     const company = row.companies as { sector?: string | null; country?: string | null } | null;
     if (filters.sector && company?.sector !== filters.sector) return false;
     if (filters.country && company?.country !== filters.country) return false;
+    if (filters.stageBucket) {
+      const roundStage = normalizeStageBucket(row.round_type as string | null);
+      if (roundStage !== filters.stageBucket) return false;
+    }
     return true;
   });
 
@@ -589,6 +615,7 @@ async function queryPricingFromFundingRounds(
       key: `round:${String(r.id)}`,
       sector: company?.sector ?? null,
       country: company?.country ?? null,
+      stageBucket: normalizeStageBucket(r.round_type as string | null),
       pre_money_valuation: effectivePreMoney,
       revenue_at_raise: companyId ? (revenueByCompany.get(companyId) ?? null) : null,
       amount_raised: r.amount_raised as number | null,
@@ -608,7 +635,7 @@ async function queryPricingFromCrowdfundingOutcomes(
   const { data, error } = await supabase
     .from("crowdfunding_outcomes")
     .select(
-      "id, company_id, pre_money_valuation, revenue_at_raise, amount_raised, companies!inner(source, sector, country)",
+      "id, company_id, stage_bucket, pre_money_valuation, revenue_at_raise, amount_raised, companies!inner(source, sector, country)",
     )
     .lte("label_quality_tier", 2)
     .not("pre_money_valuation", "is", null)
@@ -624,6 +651,10 @@ async function queryPricingFromCrowdfundingOutcomes(
       const company = row.companies as { sector?: string | null; country?: string | null } | null;
       if (filters.sector && company?.sector !== filters.sector) return false;
       if (filters.country && company?.country !== filters.country) return false;
+      if (filters.stageBucket) {
+        const stageBucket = normalizeStageBucket(row.stage_bucket as string | null);
+        if (stageBucket !== filters.stageBucket) return false;
+      }
       return true;
     })
     .map((row) => {
@@ -633,6 +664,7 @@ async function queryPricingFromCrowdfundingOutcomes(
         key: `co:${String(row.id)}`,
         sector: company?.sector ?? null,
         country: company?.country ?? null,
+        stageBucket: normalizeStageBucket(row.stage_bucket as string | null),
         pre_money_valuation: row.pre_money_valuation as number | null,
         revenue_at_raise: row.revenue_at_raise as number | null,
         amount_raised: row.amount_raised as number | null,
@@ -785,6 +817,10 @@ export async function findComparables(
       })
       .filter((v): v is number => v !== null && isFinite(v) && v > 0);
 
+    const pricingStageAlignedSample = input.stageBucket
+      ? pricingRows.filter((r) => r.stageBucket === input.stageBucket).length
+      : pricingRows.length;
+
     const outcomeMultiples = outcomeRows
       .map((r) => {
         if (!r.pre_money_valuation || !r.revenue_at_raise || r.revenue_at_raise <= 0) {
@@ -853,6 +889,7 @@ export async function findComparables(
       sourceConfidence,
       pricingRevenueSampleSize: pricingRevenueMultiples.length,
       pricingProxySampleSize: pricingProxyMultiples.length,
+      pricingStageAlignedSample,
       tierBreakdown: pricingTierBreakdown,
       weightedCoverage: weightedPricingCoverage,
     });
@@ -867,6 +904,7 @@ export async function findComparables(
         pricingSampleSize,
         pricingRevenueSampleSize: pricingRevenueMultiples.length,
         pricingProxySampleSize: pricingProxyMultiples.length,
+        pricingStageAlignedSample,
         pricingSourceBreakdown,
         pricingTierBreakdown,
         weightedPricingCoverage: Math.round(weightedPricingCoverage * 100) / 100,

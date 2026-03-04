@@ -185,6 +185,7 @@ type ScoreResponse = {
       pricingSampleSize: number;
       pricingRevenueSampleSize: number;
       pricingProxySampleSize: number;
+      pricingStageAlignedSample: number;
       pricingSourceBreakdown: Record<string, number>;
       pricingTierBreakdown: Record<"A" | "B" | "C", number>;
       weightedPricingCoverage: number;
@@ -211,6 +212,15 @@ type ScoreResponse = {
     confidencePenalty: number;
     confidencePenaltyReasons: string[];
     abstainReasons: string[];
+    termFieldSources: Record<string, string>;
+    termConflicts: string[];
+    analystReadiness: {
+      status: "ready" | "caution" | "blocked";
+      passedCriteria: number;
+      totalCriteria: number;
+      reasons: string[];
+    };
+    operationalWarnings: string[];
   };
 };
 

@@ -26,6 +26,7 @@ from run_synthetic_analyst_pilot_agents import (  # noqa: E402
     _seed_recommendation_class,
     _select_pilot_items,
     _upsert_decision,
+    _validate_run_quality,
 )
 
 # ---------------------------------------------------------------------------
@@ -609,3 +610,34 @@ class TestDataSufficiencyAndSelection:
         assert len(selected) == 4
         model_count = sum(1 for i in selected if i.get("model_recommendation"))
         assert model_count >= 2
+
+
+class TestPilotQualityValidation:
+    def test_validate_run_quality_passes_when_thresholds_met(self) -> None:
+        summary = {
+            "classCoverageCount": 3,
+            "abstainRate": 0.2,
+            "nonFallbackRate": 0.95,
+        }
+        failures = _validate_run_quality(
+            summary,
+            min_class_coverage=3,
+            max_abstain_rate=0.6,
+            min_non_fallback_rate=0.7,
+        )
+        assert failures == []
+
+    def test_validate_run_quality_flags_failures(self) -> None:
+        summary = {
+            "classCoverageCount": 1,
+            "abstainRate": 0.9,
+            "nonFallbackRate": 0.4,
+        }
+        failures = _validate_run_quality(
+            summary,
+            min_class_coverage=3,
+            max_abstain_rate=0.6,
+            min_non_fallback_rate=0.7,
+        )
+        assert len(failures) == 3
+        assert "class_coverage" in failures[0]

@@ -1439,6 +1439,9 @@ def _aggregate(
     fallback_reason_distribution = dict(
         Counter(d.fallback_reason for d in all_decisions if d.fallback_reason)
     )
+    abstain_count = recommendation_counts.get("abstain", 0)
+    abstain_rate = round(abstain_count / total_decisions, 4) if total_decisions else 0.0
+    class_coverage_count = len(recommendation_counts)
 
     # Model alignment coverage: fraction of items with a non-null model recommendation
     items_with_model = sum(
@@ -1469,11 +1472,40 @@ def _aggregate(
         "nonFallbackRate": non_fallback_rate,
         "nonFallbackDecisionCount": non_fallback_count,
         "fallbackReasonDistribution": fallback_reason_distribution,
+        "abstainRate": abstain_rate,
+        "classCoverageCount": class_coverage_count,
         "modelAlignmentCoverage": model_alignment_coverage,
         "executionMode": "parallel_async_agents",
         "agentCount": len(agent_states),
         "generatedAt": datetime.now(UTC).isoformat(),
     }
+
+
+def _validate_run_quality(
+    summary: dict[str, Any],
+    *,
+    min_class_coverage: int,
+    max_abstain_rate: float,
+    min_non_fallback_rate: float,
+) -> list[str]:
+    failures: list[str] = []
+    class_count = int(summary.get("classCoverageCount") or 0)
+    abstain_rate = float(summary.get("abstainRate") or 0.0)
+    non_fallback_rate = float(summary.get("nonFallbackRate") or 0.0)
+
+    if class_count < min_class_coverage:
+        failures.append(
+            f"class_coverage {class_count} < required {min_class_coverage}"
+        )
+    if abstain_rate > max_abstain_rate:
+        failures.append(
+            f"abstain_rate {abstain_rate:.2%} > allowed {max_abstain_rate:.2%}"
+        )
+    if non_fallback_rate < min_non_fallback_rate:
+        failures.append(
+            f"non_fallback_rate {non_fallback_rate:.2%} < required {min_non_fallback_rate:.2%}"
+        )
+    return failures
 
 
 # ---------------------------------------------------------------------------
@@ -1502,6 +1534,9 @@ def _write_report(summary: dict[str, Any], output_dir: Path) -> tuple[Path, Path
         f"- Disagreement rate: {summary['disagreementRate']}",
         f"- Model-majority alignment rate: {summary['modelMajorityAlignmentRate']}",
         f"- Fallback rate: {summary.get('fallbackRate', 0)}",
+        f"- Abstain rate: {summary.get('abstainRate', 0)}",
+        f"- Class coverage count: {summary.get('classCoverageCount', 0)}",
+        f"- Quality gates passed: {summary.get('qualityGatePassed', True)}",
         "",
         "## Majority Recommendation Distribution",
         "",
@@ -1525,6 +1560,13 @@ def _write_report(summary: dict[str, Any], output_dir: Path) -> tuple[Path, Path
         md_lines.extend(["## Fallback Reasons", ""])
         for reason, count in fallback_reasons.items():
             md_lines.append(f"- {reason}: {count}")
+        md_lines.append("")
+
+    quality_failures = summary.get("qualityGateFailures", [])
+    if quality_failures:
+        md_lines.extend(["## Quality Gate Failures", ""])
+        for failure in quality_failures:
+            md_lines.append(f"- {failure}")
         md_lines.append("")
 
     md_path.write_text("\n".join(md_lines), encoding="utf-8")
@@ -1567,6 +1609,14 @@ def main(
         DEFAULT_MIN_CLASS_COVERAGE,
         help="Minimum distinct recommendation classes in selected pilot set.",
     ),
+    max_abstain_rate: float = typer.Option(
+        0.60,
+        help="Maximum allowed abstain share in final agent decisions.",
+    ),
+    min_non_fallback_rate: float = typer.Option(
+        0.70,
+        help="Minimum required non-fallback decision rate in final agent decisions.",
+    ),
     seed_model_evals: bool = typer.Option(
         True,
         "--seed-model-evals/--no-seed-model-evals",
@@ -1581,6 +1631,10 @@ def main(
         raise typer.BadParameter("min_class_coverage must be >= 1")
     if not (0.0 <= min_sufficiency_score <= 100.0):
         raise typer.BadParameter("min_sufficiency_score must be in [0, 100]")
+    if not (0.0 <= max_abstain_rate <= 1.0):
+        raise typer.BadParameter("max_abstain_rate must be in [0, 1]")
+    if not (0.0 <= min_non_fallback_rate <= 1.0):
+        raise typer.BadParameter("min_non_fallback_rate must be in [0, 1]")
 
     settings = get_settings()
     if not settings.anthropic_api_key:
@@ -1720,6 +1774,15 @@ def main(
 
         # Aggregate + report
         summary = _aggregate(name, cycle, agent_states)
+        quality_failures = _validate_run_quality(
+            summary,
+            min_class_coverage=min_class_coverage,
+            max_abstain_rate=max_abstain_rate,
+            min_non_fallback_rate=min_non_fallback_rate,
+        )
+        summary["qualityGateFailures"] = quality_failures
+        summary["qualityGatePassed"] = len(quality_failures) == 0
+
         json_path, md_path = _write_report(summary, Path(output_dir))
 
         # Update run with summary
@@ -1733,6 +1796,11 @@ def main(
             (json.dumps(summary, default=_json_default), run_id),
         )
         conn.commit()
+
+        if quality_failures:
+            raise typer.BadParameter(
+                "Pilot run failed quality gates: " + "; ".join(quality_failures)
+            )
 
         logger.info(
             "multi_agent_pilot_completed",

@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from run_demo_curation import _evidence_rank, _memo_markdown  # noqa: E402
+from run_demo_curation import _evidence_rank, _memo_markdown, _select_diverse_items  # noqa: E402
 
 
 def test_evidence_rank_prefers_higher_sufficiency() -> None:
@@ -39,3 +39,44 @@ def test_memo_markdown_contains_required_sections() -> None:
     assert "## Category Scores" in memo
     assert "## Risks" in memo
     assert "## Missing Data" in memo
+
+
+def test_select_diverse_items_prefers_class_diversity() -> None:
+    items = [
+        {
+            "shadow_cycle_item_id": "i1",
+            "company_name": "A",
+            "model_recommendation": "watch",
+            "sector": "fintech",
+            "country": "US",
+            "data_sufficiency": {"score": 90, "category_count": 5},
+        },
+        {
+            "shadow_cycle_item_id": "i2",
+            "company_name": "B",
+            "model_recommendation": "watch",
+            "sector": "fintech",
+            "country": "US",
+            "data_sufficiency": {"score": 89, "category_count": 5},
+        },
+        {
+            "shadow_cycle_item_id": "i3",
+            "company_name": "C",
+            "model_recommendation": "deep_diligence",
+            "sector": "health",
+            "country": "UK",
+            "data_sufficiency": {"score": 75, "category_count": 4},
+        },
+        {
+            "shadow_cycle_item_id": "i4",
+            "company_name": "D",
+            "model_recommendation": "pass",
+            "sector": "climate",
+            "country": "US",
+            "data_sufficiency": {"score": 70, "category_count": 4},
+        },
+    ]
+    selected = _select_diverse_items(items, top_n=3)
+    classes = {str(i.get("model_recommendation")).lower() for i in selected}
+    assert len(selected) == 3
+    assert len(classes) >= 3

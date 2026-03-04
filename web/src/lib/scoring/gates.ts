@@ -17,6 +17,7 @@ export interface GateResult {
 export interface GateCheckInput {
   dataCompleteness: number;
   modelScore: number;
+  modelPFail?: number | null;
   confidenceRange: number;
   isQuickScore: boolean;
   enforceReliabilityGates?: boolean;
@@ -38,6 +39,7 @@ export interface GateCheckInput {
   underAdministration?: boolean;
   sanctionsMatch?: boolean;
   accountsOverdue12Mo?: boolean;
+  termConflictCount?: number;
 }
 
 /**
@@ -70,7 +72,7 @@ export function checkGates(input: GateCheckInput): GateResult[] {
   });
 
   // Gate 2: Model confidence (entropy)
-  const pFail = 1 - input.modelScore / 100;
+  const pFail = input.modelPFail ?? (1 - input.modelScore / 100);
   const entropy = normalizedEntropy(pFail);
   const entropyPassed = entropy < 0.70;
   results.push({
@@ -82,6 +84,24 @@ export function checkGates(input: GateCheckInput): GateResult[] {
     reason: entropyPassed
       ? "Model can distinguish this deal from base rate"
       : "Model cannot reliably distinguish from base rate",
+  });
+
+  // Gate 2b: Term consistency (structured terms vs extracted terms)
+  const termConflictCount = input.termConflictCount ?? 0;
+  const termConsistencyPassed = termConflictCount <= 1;
+  results.push({
+    name: "Term Consistency",
+    passed: termConsistencyPassed,
+    value: termConflictCount,
+    threshold: "<= 1 conflicting term field",
+    action: termConsistencyPassed ? "pass" : "abstain",
+    reason: termConsistencyPassed
+      ? (
+        termConflictCount === 0
+          ? "No material term conflicts detected."
+          : "Minor term mismatch detected; proceed with caution."
+      )
+      : "Multiple term fields conflict across sources; deep diligence required.",
   });
 
   // Gate 3: Segment evidence quality (US/UK x stage)
