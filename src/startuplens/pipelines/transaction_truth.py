@@ -17,9 +17,12 @@ import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import httpx
+import pandas as pd
 import structlog
 
 from startuplens.db import execute_query
@@ -46,6 +49,7 @@ _MIN_REQUEST_INTERVAL = 0.11
 _CORE_TERM_FIELDS = (
     "round_type",
     "instrument_type",
+    "amount_raised",
     "pre_money_valuation",
     "post_money_valuation",
     "valuation_cap",
@@ -96,6 +100,22 @@ class RoundFieldFact:
 
 def _now_utc() -> datetime:
     return datetime.now(tz=UTC)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _safe_json_dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_default)
 
 
 def _normalize_name(value: str | None) -> str:
@@ -337,7 +357,7 @@ def insert_source_record(
             source_url,
             source_timestamp,
             source_tier,
-            json.dumps(raw_payload or {}),
+            _safe_json_dumps(raw_payload or {}),
         ),
     )
 
@@ -360,7 +380,7 @@ def insert_field_fact(conn: psycopg.Connection, fact: RoundFieldFact) -> None:
         (
             fact.transaction_round_id,
             fact.field_name,
-            json.dumps({"value": fact.field_value}),
+            _safe_json_dumps({"value": fact.field_value}),
             fact.source_name,
             fact.source_record_id,
             fact.source_tier,
@@ -383,19 +403,28 @@ def _stage_from_round(round_type: str | None, amount_raised: float | None) -> st
 
 
 def _as_json_value(raw: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in raw.items() if v is not None}
+    return {k: _json_default(v) for k, v in raw.items() if v is not None}
 
 
 def ingest_us_private_round_spine(
     conn: psycopg.Connection,
     *,
+    country: str | None = "US",
     limit: int | None = None,
 ) -> dict[str, int]:
-    """Build US private-round spine from Form D era data and existing rounds.
+    """Build private-round spine from existing funding rounds.
 
     Includes amendment stitching by issuer/date/instrument/amount.
     """
-    query = """
+    where_clauses = [
+        "c.source IN ('sec_form_d', 'sec_edgar', 'sec_dera_cf', 'companies_house')",
+    ]
+    params: list[Any] = []
+    if country:
+        where_clauses.append("c.country = %s")
+        params.append(country)
+
+    query = f"""
         SELECT
           c.id AS company_id,
           c.entity_id,
@@ -439,16 +468,14 @@ def ingest_us_private_round_spine(
             ORDER BY f.period_end_date DESC
             LIMIT 1
         ) fd ON true
-        WHERE c.country = 'US'
-          AND c.source IN ('sec_form_d', 'sec_edgar', 'sec_dera_cf')
+        WHERE {' AND '.join(where_clauses)}
         ORDER BY fr.round_date DESC NULLS LAST, fr.id
     """
-    params: tuple[Any, ...] = ()
     if limit is not None:
         query += " LIMIT %s"
-        params = (limit,)
+        params.append(limit)
 
-    rows = execute_query(conn, query, params)
+    rows = execute_query(conn, query, tuple(params))
     created = 0
     facts_inserted = 0
 
@@ -546,6 +573,163 @@ def ingest_us_private_round_spine(
     return {"rounds_upserted": created, "facts_inserted": facts_inserted}
 
 
+def ingest_round_spine_from_crowdfunding_outcomes(
+    conn: psycopg.Connection,
+    *,
+    max_label_tier: int = 3,
+    limit: int | None = None,
+) -> dict[str, int]:
+    """Backfill transaction rounds directly from crowdfunding outcomes.
+
+    This widens valuation/comparable coverage for cohorts that have campaign
+    evidence but sparse funding_rounds rows.
+    """
+    query = """
+        SELECT
+          co.id::text AS outcome_id,
+          co.company_id::text AS company_id,
+          c.entity_id::text AS entity_id,
+          c.country,
+          COALESCE(co.sector, c.sector) AS sector,
+          co.stage_bucket,
+          co.campaign_date AS round_date,
+          co.amount_raised,
+          co.funding_target,
+          co.pre_money_valuation,
+          co.equity_offered,
+          co.overfunding_ratio,
+          co.investor_count,
+          co.revenue_at_raise,
+          co.data_source,
+          co.label_quality_tier
+        FROM crowdfunding_outcomes co
+        JOIN companies c ON c.id = co.company_id
+        WHERE co.label_quality_tier <= %s
+          AND co.campaign_date IS NOT NULL
+          AND (co.amount_raised IS NOT NULL OR co.funding_target IS NOT NULL)
+        ORDER BY co.campaign_date DESC, co.id
+    """
+    params: list[Any] = [max_label_tier]
+    if limit is not None:
+        query += " LIMIT %s"
+        params.append(limit)
+
+    rows = execute_query(conn, query, tuple(params))
+
+    rounds_upserted = 0
+    facts_inserted = 0
+    derived_terms = 0
+
+    for row in rows:
+        amount = _safe_float(row.get("amount_raised")) or _safe_float(row.get("funding_target"))
+        round_date = row.get("round_date")
+        if isinstance(round_date, datetime):
+            round_date = round_date.date()
+
+        data_source = str(row.get("data_source") or "")
+        tier = _source_tier_for_name(data_source)
+        if int(row.get("label_quality_tier") or 3) >= 3 and tier == "A":
+            tier = "B"
+
+        pre_money = _safe_float(row.get("pre_money_valuation"))
+        equity_offered = _safe_float(row.get("equity_offered"))
+        post_money = None
+        if pre_money is not None and equity_offered is not None and 0 < equity_offered < 1:
+            post_money = pre_money / max(1e-9, (1 - equity_offered))
+            derived_terms += 1
+        elif (
+            pre_money is None
+            and amount is not None
+            and equity_offered is not None
+            and 0 < equity_offered <= 1
+        ):
+            post_money = amount / max(1e-9, equity_offered)
+            pre_money = max(0.0, post_money - amount)
+            derived_terms += 1
+
+        round_key = build_round_stitch_key(
+            company_id=row["company_id"],
+            round_date=round_date,
+            round_type="reg_cf",
+            instrument_type="equity",
+            amount_raised=amount,
+        )
+
+        round_id = upsert_transaction_round(
+            conn,
+            company_id=row["company_id"],
+            entity_id=row.get("entity_id"),
+            country=row.get("country"),
+            sector=row.get("sector"),
+            stage_bucket=row.get("stage_bucket"),
+            round_stitch_key=round_key,
+            round_type="reg_cf",
+            instrument_type="equity",
+            round_date=round_date,
+            amount_raised=amount,
+            source_timestamp=datetime.combine(
+                round_date or date.today(),
+                datetime.min.time(),
+                tzinfo=UTC,
+            ),
+            source_tier=tier,
+        )
+        rounds_upserted += 1
+
+        insert_source_record(
+            conn,
+            transaction_round_id=round_id,
+            source_name=f"crowdfunding_outcomes:{data_source or 'unknown'}",
+            source_record_id=row["outcome_id"],
+            source_url=None,
+            source_timestamp=datetime.combine(
+                round_date or date.today(),
+                datetime.min.time(),
+                tzinfo=UTC,
+            ),
+            source_tier=tier,
+            raw_payload=_as_json_value(row),
+        )
+
+        facts_payload = {
+            "round_type": "reg_cf",
+            "instrument_type": "equity",
+            "round_date": round_date,
+            "amount_raised": amount,
+            "pre_money_valuation": pre_money,
+            "post_money_valuation": post_money,
+            "arr_revenue": _safe_float(row.get("revenue_at_raise")),
+            "overfunding_ratio": _safe_float(row.get("overfunding_ratio")),
+        }
+        for field_name, value in facts_payload.items():
+            if value is None:
+                continue
+            insert_field_fact(
+                conn,
+                RoundFieldFact(
+                    transaction_round_id=round_id,
+                    field_name=field_name,
+                    field_value=value,
+                    source_name=f"crowdfunding_outcomes:{data_source or 'unknown'}",
+                    source_record_id=row["outcome_id"],
+                    source_tier=tier,
+                    as_of_timestamp=datetime.combine(
+                        round_date or date.today(),
+                        datetime.min.time(),
+                        tzinfo=UTC,
+                    ),
+                ),
+            )
+            facts_inserted += 1
+
+    conn.commit()
+    return {
+        "rounds_upserted": rounds_upserted,
+        "facts_inserted": facts_inserted,
+        "derived_terms": derived_terms,
+    }
+
+
 def _extract_edgar_terms(text: str) -> dict[str, Any]:
     lower = text.lower()
     out: dict[str, Any] = {}
@@ -571,6 +755,209 @@ def _extract_edgar_terms(text: str) -> dict[str, Any]:
         out["liquidation_participation"] = "non_participating"
 
     return {k: v for k, v in out.items() if v is not None}
+
+
+def _parse_scaled_amount(raw: str) -> float | None:
+    match = re.match(r"^\s*([\d,]+(?:\.\d+)?)\s*(k|m|b|million|billion)?\s*$", raw, re.I)
+    if not match:
+        return _safe_float(raw)
+    base = _safe_float(match.group(1))
+    if base is None:
+        return None
+    unit = (match.group(2) or "").lower()
+    if unit == "k":
+        return base * 1_000
+    if unit in {"m", "million"}:
+        return base * 1_000_000
+    if unit in {"b", "billion"}:
+        return base * 1_000_000_000
+    return base
+
+
+def _extract_terms_from_form_c_text(text: str) -> dict[str, Any]:
+    lower = text.lower()
+    out: dict[str, Any] = {}
+
+    pre_money_match = re.search(
+        (
+            r"pre[-\s]?money\s+valuation(?:\s*(?:of|is|:|=))?\s*\$?\s*"
+            r"([\d,]+(?:\.\d+)?\s*(?:k|m|b|million|billion)?)"
+        ),
+        lower,
+    )
+    if pre_money_match:
+        out["pre_money_valuation"] = _parse_scaled_amount(pre_money_match.group(1))
+
+    post_money_match = re.search(
+        (
+            r"post[-\s]?money\s+valuation(?:\s*(?:of|is|:|=))?\s*\$?\s*"
+            r"([\d,]+(?:\.\d+)?\s*(?:k|m|b|million|billion)?)"
+        ),
+        lower,
+    )
+    if post_money_match:
+        out["post_money_valuation"] = _parse_scaled_amount(post_money_match.group(1))
+
+    val_cap_match = re.search(
+        r"valuation\s+cap(?:\s*(?:of|:|=))?\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:k|m|b|million|billion)?)",
+        lower,
+    )
+    if val_cap_match:
+        out["valuation_cap"] = _parse_scaled_amount(val_cap_match.group(1))
+
+    discount_match = (
+        re.search(r"discount(?:\s+rate)?(?:\s*(?:of|:|=))?\s*(\d{1,2}(?:\.\d+)?)\s*%", lower)
+        or re.search(r"(\d{1,2}(?:\.\d+)?)\s*%\s*discount", lower)
+    )
+    if discount_match:
+        out["discount_rate"] = _safe_float(discount_match.group(1) + "%")
+
+    interest_match = (
+        re.search(r"interest(?:\s+rate)?(?:\s*(?:of|:|=))?\s*(\d{1,2}(?:\.\d+)?)\s*%", lower)
+        or re.search(r"(\d{1,2}(?:\.\d+)?)\s*%\s*interest", lower)
+    )
+    if interest_match:
+        out["interest_rate"] = _safe_float(interest_match.group(1) + "%")
+
+    maturity_match = re.search(
+        (
+            r"matur(?:ity|es?)(?:\s+date)?(?:\s*(?:on|:|=))?\s*"
+            r"([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4})"
+        ),
+        text,
+        re.I,
+    )
+    if maturity_match:
+        maturity = _safe_date(maturity_match.group(1))
+        if maturity:
+            out["maturity_date"] = maturity.isoformat()
+
+    liq_pref_match = (
+        re.search(r"(\d(?:\.\d+)?)x\s+liquidation\s+preference", lower)
+        or re.search(r"liquidation\s+preference(?:\s*(?:of|:|=))?\s*(\d(?:\.\d+)?)x", lower)
+    )
+    if liq_pref_match:
+        out["liquidation_preference_multiple"] = _safe_float(liq_pref_match.group(1))
+
+    if re.search(r"non[-\s]?participating", lower):
+        out["liquidation_participation"] = "non_participating"
+    elif re.search(r"\bparticipating\b", lower):
+        out["liquidation_participation"] = "participating"
+
+    if re.search(r"no\s+pro[-\s]?rata", lower):
+        out["pro_rata_rights"] = False
+    elif re.search(r"pro[-\s]?rata(?:\s+rights?|\s+participation)?", lower):
+        out["pro_rata_rights"] = True
+
+    lead_match = re.search(
+        r"(?:led\s+by|lead\s+investor[:\s])\s*([A-Z][A-Za-z0-9&.,' -]{2,60})",
+        text,
+    )
+    if lead_match:
+        out["lead_investor"] = lead_match.group(1).strip(" .,")
+
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def ingest_terms_from_form_c_texts(
+    conn: psycopg.Connection,
+    *,
+    max_rounds: int = 12000,
+    min_text_length: int = 180,
+) -> dict[str, int]:
+    """Extract valuation/term hints from already-ingested Form C narrative text."""
+    rows = execute_query(
+        conn,
+        """
+        SELECT
+          tr.id AS transaction_round_id,
+          tr.round_date,
+          tr.company_id,
+          sft.id AS form_c_text_id,
+          sft.filing_date,
+          sft.narrative_text
+        FROM transaction_rounds tr
+        JOIN companies c ON c.id = tr.company_id
+        JOIN LATERAL (
+          SELECT s.id, s.filing_date, s.narrative_text
+          FROM sec_form_c_texts s
+          WHERE length(COALESCE(s.narrative_text, '')) >= %s
+            AND (tr.round_date IS NULL OR s.filing_date <= tr.round_date)
+            AND (
+              s.company_id = tr.company_id
+              OR (
+                c.source_id IS NOT NULL
+                AND regexp_replace(COALESCE(s.cik, ''), '^0+', '') =
+                    regexp_replace(split_part(c.source_id, '_q', 1), '^0+', '')
+              )
+            )
+          ORDER BY
+            CASE WHEN s.company_id = tr.company_id THEN 0 ELSE 1 END,
+            s.filing_date DESC NULLS LAST,
+            s.created_at DESC NULLS LAST
+          LIMIT 1
+        ) sft ON true
+        WHERE tr.country = 'US'
+        ORDER BY tr.round_date DESC NULLS LAST
+        LIMIT %s
+        """,
+        (min_text_length, max_rounds),
+    )
+
+    processed = 0
+    facts_inserted = 0
+
+    for row in rows:
+        text = str(row.get("narrative_text") or "")
+        extracted = _extract_terms_from_form_c_text(text)
+        if not extracted:
+            continue
+
+        round_date = row.get("round_date")
+        if isinstance(round_date, datetime):
+            round_date = round_date.date()
+        filing_date = row.get("filing_date")
+        if isinstance(filing_date, datetime):
+            filing_date = filing_date.date()
+
+        insert_source_record(
+            conn,
+            transaction_round_id=row["transaction_round_id"],
+            source_name="sec_form_c_texts_terms",
+            source_record_id=str(row["form_c_text_id"]),
+            source_url=None,
+            source_timestamp=datetime.combine(
+                filing_date or round_date or date.today(),
+                datetime.min.time(),
+                tzinfo=UTC,
+            ),
+            source_tier="B",
+            raw_payload={"extracted_fields": sorted(extracted.keys())},
+        )
+
+        as_of = datetime.combine(
+            filing_date or round_date or date.today(),
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        for field_name, value in extracted.items():
+            insert_field_fact(
+                conn,
+                RoundFieldFact(
+                    transaction_round_id=row["transaction_round_id"],
+                    field_name=field_name,
+                    field_value=value,
+                    source_name="sec_form_c_texts_terms",
+                    source_record_id=str(row["form_c_text_id"]),
+                    source_tier="B",
+                    as_of_timestamp=as_of,
+                ),
+            )
+            facts_inserted += 1
+        processed += 1
+
+    conn.commit()
+    return {"rounds_processed": processed, "facts_inserted": facts_inserted}
 
 
 def ingest_late_stage_terms_from_edgar(
@@ -797,7 +1184,7 @@ def ingest_uk_private_round_spine(
                         (
                             company_id,
                             entity_id,
-                            json.dumps({"company_status": status}),
+                            _safe_json_dumps({"company_status": status}),
                         ),
                     )
 
@@ -932,10 +1319,24 @@ def _is_conflict(a: Any, b: Any) -> bool:
     return str(a).lower() != str(b).lower()
 
 
+def _completeness_fields_for_round(truth_map: dict[str, Any]) -> tuple[str, ...]:
+    instrument = str(truth_map.get("instrument_type") or "").lower()
+    round_type = str(truth_map.get("round_type") or "").lower()
+    baseline = ("round_type", "instrument_type", "amount_raised")
+    is_convertible = any(
+        token in instrument or token in round_type
+        for token in ("safe", "note", "convertible", "debt")
+    )
+    if is_convertible:
+        return baseline + ("valuation_cap", "discount_rate")
+    return baseline + ("pre_money_valuation", "post_money_valuation")
+
+
 def reconcile_transaction_round_fields(
     conn: psycopg.Connection,
     *,
     limit_rounds: int | None = None,
+    batch_commit_size: int = 1000,
 ) -> dict[str, int]:
     """Reconcile field-level facts into transaction truth rows + round confidence."""
     query = """
@@ -972,7 +1373,6 @@ def reconcile_transaction_round_fields(
             by_field[fact["field_name"]].append(fact)
 
         valuation_conflicts = 0
-        core_populated = 0
         confidence_values: list[float] = []
 
         for field_name, field_facts in by_field.items():
@@ -1037,8 +1437,6 @@ def reconcile_transaction_round_fields(
             confidence = max(0.0, min(1.0, base_conf + evidence_bonus - conflict_penalty))
             confidence_values.append(confidence)
 
-            if field_name in _CORE_TERM_FIELDS and selected_value is not None:
-                core_populated += 1
             if field_name in _VALUATION_CRITICAL_FIELDS and conflict_state == "major":
                 valuation_conflicts += 1
 
@@ -1072,9 +1470,9 @@ def reconcile_transaction_round_fields(
                 (
                     round_id,
                     field_name,
-                    json.dumps({"value": selected_value}),
-                    json.dumps(source_names),
-                    json.dumps(source_record_ids),
+                    _safe_json_dumps({"value": selected_value}),
+                    _safe_json_dumps(source_names),
+                    _safe_json_dumps(source_record_ids),
                     selected_fact.get("as_of_timestamp"),
                     conflict_state,
                     confidence,
@@ -1127,7 +1525,15 @@ def reconcile_transaction_round_fields(
                 if as_of > max_as_of:
                     max_as_of = as_of
 
-        core_term_completeness = core_populated / len(_CORE_TERM_FIELDS)
+        completeness_fields = _completeness_fields_for_round(truth_map)
+        core_populated = sum(
+            1
+            for field_name in completeness_fields
+            if truth_map.get(field_name) not in (None, "", "unknown")
+        )
+        core_term_completeness = (
+            core_populated / len(completeness_fields) if completeness_fields else 0.0
+        )
         avg_conf = sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
 
         if avg_conf >= 0.8 and valuation_conflicts == 0 and core_term_completeness >= 0.85:
@@ -1207,6 +1613,13 @@ def reconcile_transaction_round_fields(
         )
 
         rounds_processed += 1
+        if batch_commit_size > 0 and rounds_processed % batch_commit_size == 0:
+            conn.commit()
+            logger.info(
+                "transaction_truth_reconcile_progress",
+                rounds_processed=rounds_processed,
+                truth_fields_upserted=truths_upserted,
+            )
 
     conn.commit()
     return {
@@ -1219,7 +1632,10 @@ def apply_valuation_truth_gate(
     conn: psycopg.Connection,
     *,
     min_core_term_completeness: float = 0.85,
+    min_core_term_completeness_tier_a: float = 0.60,
+    min_core_term_completeness_tier_b: float = 0.70,
     max_conflicts: int = 0,
+    batch_commit_size: int = 2000,
 ) -> dict[str, int]:
     """Apply strict valuation confidence gates at transaction-round level."""
     rounds = execute_query(
@@ -1231,6 +1647,7 @@ def apply_valuation_truth_gate(
     )
     passed = 0
     blocked = 0
+    strict_shortfall = 0
 
     for row in rounds:
         completeness = float(row.get("core_term_completeness") or 0)
@@ -1239,8 +1656,16 @@ def apply_valuation_truth_gate(
         confidence_band = str(row.get("confidence_band") or "low")
 
         reasons: list[str] = []
+        required_completeness = min_core_term_completeness
+        if source_tier == "A":
+            required_completeness = min_core_term_completeness_tier_a
+        elif source_tier == "B":
+            required_completeness = min_core_term_completeness_tier_b
+
+        if completeness < required_completeness:
+            reasons.append(f"core_term_completeness<{required_completeness:.2f}")
         if completeness < min_core_term_completeness:
-            reasons.append(f"core_term_completeness<{min_core_term_completeness:.2f}")
+            strict_shortfall += 1
         if conflicts > max_conflicts:
             reasons.append(f"valuation_conflicts>{max_conflicts}")
         if source_tier == "C":
@@ -1273,14 +1698,27 @@ def apply_valuation_truth_gate(
                 row["id"],
             ),
         )
+        total_processed = passed + blocked
+        if batch_commit_size > 0 and total_processed % batch_commit_size == 0:
+            conn.commit()
+            logger.info(
+                "transaction_truth_gate_progress",
+                rounds_processed=total_processed,
+                rounds_passed=passed,
+                rounds_blocked=blocked,
+            )
 
     conn.commit()
-    return {"rounds_passed": passed, "rounds_blocked": blocked}
+    return {
+        "rounds_passed": passed,
+        "rounds_blocked": blocked,
+        "strict_shortfall": strict_shortfall,
+    }
 
 
 def _extract_adv_latest_zip_links(html: str) -> list[str]:
     links = re.findall(r'href="([^"]+)"', html, flags=re.IGNORECASE)
-    candidates = []
+    candidates: list[tuple[datetime, str]] = []
     for link in links:
         low = link.lower()
         if not low.endswith(".zip"):
@@ -1289,25 +1727,67 @@ def _extract_adv_latest_zip_links(html: str) -> list[str]:
             continue
         if link.startswith("/"):
             link = "https://www.sec.gov" + link
-        candidates.append(link)
-    # newest naming tends to sort lexicographically by date token in filename
-    return sorted(set(candidates), reverse=True)
+        filename = link.rsplit("/", 1)[-1].lower()
+        match = re.search(r"ia(\d{6})", filename)
+        if not match:
+            continue
+        try:
+            stamp = datetime.strptime(match.group(1), "%m%d%y")
+        except ValueError:
+            continue
+        candidates.append((stamp, link))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for _stamp, link in sorted(
+        candidates,
+        key=lambda item: (item[0], "exempt" not in item[1].lower()),
+        reverse=True,
+    ):
+        if link in seen:
+            continue
+        seen.add(link)
+        ordered.append(link)
+    return ordered
 
 
 def _parse_adv_rows_from_zip(raw_zip: bytes) -> list[dict[str, Any]]:
     with zipfile.ZipFile(io.BytesIO(raw_zip)) as zf:
-        names = [n for n in zf.namelist() if n.lower().endswith((".csv", ".txt"))]
+        names = [
+            n
+            for n in zf.namelist()
+            if n.lower().endswith((".csv", ".txt", ".xlsx", ".xlsm"))
+        ]
         if not names:
             return []
-        target = names[0]
+        target = sorted(names)[0]
         data = zf.read(target)
 
+    if target.lower().endswith((".xlsx", ".xlsm")):
+        df = pd.read_excel(io.BytesIO(data), sheet_name=0, dtype=object)
+        rows: list[dict[str, Any]] = []
+        for record in df.to_dict(orient="records"):
+            normalized: dict[str, Any] = {}
+            for key, value in record.items():
+                if key is None:
+                    continue
+                normalized_key = str(key).strip().lower()
+                if not normalized_key:
+                    continue
+                if pd.isna(value):
+                    normalized[normalized_key] = None
+                elif isinstance(value, str):
+                    normalized[normalized_key] = value.strip()
+                else:
+                    normalized[normalized_key] = value
+            if normalized:
+                rows.append(normalized)
+        return rows
+
     text = data.decode("utf-8", errors="replace")
-    # Try comma first then tab fallback.
     sample = text[:2048]
     delimiter = "\t" if sample.count("\t") > sample.count(",") else ","
     reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
-    rows = []
+    rows: list[dict[str, Any]] = []
     for row in reader:
         normalized = {
             str(k).strip().lower(): (v.strip() if isinstance(v, str) else v)
@@ -1322,6 +1802,34 @@ def _pick_adv_field(row: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     for key in keys:
         if key in row and row[key]:
             return str(row[key]).strip()
+    return None
+
+
+def _parse_adv_numeric(value: Any) -> float | None:
+    direct = _safe_float(value)
+    if direct is not None:
+        return direct
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if "billion" in text:
+        matched = re.search(r"([\d,]+(?:\.\d+)?)", text)
+        if matched:
+            base = _safe_float(matched.group(1))
+            if base is not None:
+                return base * 1_000_000_000
+        return 1_000_000_000
+    if "million" in text:
+        matched = re.search(r"([\d,]+(?:\.\d+)?)", text)
+        if matched:
+            base = _safe_float(matched.group(1))
+            if base is not None:
+                return base * 1_000_000
+    matched = re.search(r"([\d,]+(?:\.\d+)?)", text)
+    if matched:
+        return _safe_float(matched.group(1))
     return None
 
 
@@ -1345,10 +1853,12 @@ def ingest_form_adv_investor_reference(
             return {"inserted": 0, "linked_rounds": 0, "scanned": 0}
 
         raw_zip = None
+        selected_link = None
         for link in links[:6]:
             try:
                 raw_zip = _rate_limited_get(client, link).content
                 if raw_zip:
+                    selected_link = link
                     break
             except Exception:
                 continue
@@ -1360,26 +1870,69 @@ def ingest_form_adv_investor_reference(
         rows = _parse_adv_rows_from_zip(raw_zip)
         for row in rows[:max_rows]:
             legal_name = _pick_adv_field(
-                row, ("legal_name", "firm_name", "name", "primary_business_name")
+                row,
+                (
+                    "legal_name",
+                    "legal name",
+                    "firm_name",
+                    "name",
+                    "primary_business_name",
+                    "primary business name",
+                ),
             )
             if not legal_name:
                 continue
             scanned += 1
 
-            sec_id = _pick_adv_field(row, ("sec_number", "sec#", "sec_file_no", "sec_file_number"))
-            crd = _pick_adv_field(row, ("crd_number", "crd", "firm_crd_number"))
-            aum = _safe_float(
+            sec_id = _pick_adv_field(
+                row,
+                (
+                    "sec_number",
+                    "sec number",
+                    "sec#",
+                    "sec_file_no",
+                    "sec_file_number",
+                ),
+            )
+            crd = _pick_adv_field(
+                row,
+                ("crd_number", "crd", "firm_crd_number", "organization crd#", "organization crd"),
+            )
+            aum = _parse_adv_numeric(
                 _pick_adv_field(
-                    row, ("regulatory_assets_under_management", "assets_under_management", "aum")
+                    row,
+                    (
+                        "regulatory_assets_under_management",
+                        "assets_under_management",
+                        "aum",
+                        "1o - if yes, approx. amount of assets",
+                        "total gross assets of private funds",
+                    ),
                 )
             )
-            exempt = _pick_adv_field(row, ("exempt_reporting_adviser", "is_exempt"))
-            disciplinary = _safe_float(
+            exempt = _pick_adv_field(
+                row,
+                ("exempt_reporting_adviser", "is_exempt", "is exempt reporting adviser"),
+            )
+            disclosure_counts = [
+                _parse_adv_numeric(v)
+                for k, v in row.items()
+                if "disclosure" in str(k).lower() and v not in (None, "")
+            ]
+            disclosure_sum = sum(x for x in disclosure_counts if x is not None)
+            disciplinary = _parse_adv_numeric(
                 _pick_adv_field(row, ("number_of_disclosures", "disciplinary_events"))
             )
+            if disciplinary is None and disclosure_sum > 0:
+                disciplinary = disclosure_sum
 
             adviser_status = "registered"
-            if exempt and str(exempt).lower() in {"y", "yes", "true", "1"}:
+            if selected_link and "exempt" in selected_link.lower():
+                adviser_status = "exempt"
+            if exempt and str(exempt).lower() in {"y", "yes", "true", "1", "exempt"}:
+                adviser_status = "exempt"
+            sec_status = _pick_adv_field(row, ("sec current status", "sec_status"))
+            if sec_status and "exempt" in sec_status.lower():
                 adviser_status = "exempt"
 
             quality_tier = "C"
@@ -1439,7 +1992,7 @@ def ingest_form_adv_investor_reference(
                     aum,
                     int(disciplinary) if disciplinary is not None else 0,
                     quality_tier,
-                    json.dumps(_as_json_value(row)),
+                    _safe_json_dumps(_as_json_value(row)),
                 ),
             )
             inserted += 1
@@ -1601,7 +2154,7 @@ def ingest_official_traction_signals(
                             "contracts_finder_search",
                             "B",
                             str(resp.url),
-                            json.dumps(details),
+                            _safe_json_dumps(details),
                         ),
                     )
                     inserted += 1
@@ -1635,7 +2188,9 @@ def ingest_official_traction_signals(
                             "ukri_gtr_search",
                             "B",
                             str(resp.url),
-                            json.dumps({"query": company_name, "status_code": resp.status_code}),
+                            _safe_json_dumps(
+                                {"query": company_name, "status_code": resp.status_code}
+                            ),
                         ),
                     )
                     inserted += 1
@@ -1678,7 +2233,7 @@ def ingest_official_traction_signals(
                             "patentsview_api",
                             "B",
                             PATENTSVIEW_SEARCH,
-                            json.dumps({"query": company_name, "total_patent_count": count}),
+                            _safe_json_dumps({"query": company_name, "total_patent_count": count}),
                         ),
                     )
                     inserted += 1

@@ -558,7 +558,6 @@ async function queryPricingFromTransactionTruth(
     .select(
       "id, sector, country, stage_bucket, pre_money_valuation, valuation_cap, arr_revenue, amount_raised, source_tier, valuation_gate_pass, confidence_band",
     )
-    .eq("valuation_gate_pass", true)
     .order("round_date", { ascending: false, nullsFirst: false })
     .limit(limit);
 
@@ -572,14 +571,20 @@ async function queryPricingFromTransactionTruth(
   const out: PricingCohortRow[] = [];
   for (const row of data as Record<string, unknown>[]) {
     const confidenceBand = (row.confidence_band as string | null) ?? "low";
-    if (confidenceBand === "low") continue;
+    const gatePass = row.valuation_gate_pass === true;
 
     const preMoney = row.pre_money_valuation as number | null;
     const valuationCap = row.valuation_cap as number | null;
     const effectivePreMoney = preMoney && preMoney > 0 ? preMoney : valuationCap;
     if (!effectivePreMoney || effectivePreMoney <= 0) continue;
 
-    const sourceTier = (row.source_tier as "A" | "B" | "C" | null) ?? "C";
+    const rowTier = (row.source_tier as "A" | "B" | "C" | null) ?? "C";
+    let sourceTier: "A" | "B" | "C" = rowTier;
+    if (!gatePass || confidenceBand === "low") {
+      sourceTier = "C";
+    } else if (confidenceBand === "medium" && sourceTier === "A") {
+      sourceTier = "B";
+    }
     out.push({
       key: `tx:${String(row.id)}`,
       sector: row.sector as string | null,
@@ -588,7 +593,7 @@ async function queryPricingFromTransactionTruth(
       pre_money_valuation: effectivePreMoney,
       revenue_at_raise: row.arr_revenue as number | null,
       amount_raised: row.amount_raised as number | null,
-      source: "transaction_rounds_truth",
+      source: gatePass ? "transaction_rounds_truth" : "transaction_rounds_truth:gate_failed",
       sourceTier,
       sourceTierWeight: SOURCE_TIER_WEIGHT[sourceTier],
     });
@@ -709,9 +714,13 @@ async function queryPricingFromCrowdfundingOutcomes(
   const { data, error } = await supabase
     .from("crowdfunding_outcomes")
     .select(
-      "id, company_id, stage_bucket, pre_money_valuation, revenue_at_raise, amount_raised, companies!inner(source, sector, country)",
+      (
+        "id, company_id, stage_bucket, pre_money_valuation, "
+        + "revenue_at_raise, amount_raised, label_quality_tier, "
+        + "companies!inner(source, sector, country)"
+      ),
     )
-    .lte("label_quality_tier", 2)
+    .lte("label_quality_tier", 3)
     .not("pre_money_valuation", "is", null)
     .gt("pre_money_valuation", 0)
     .order("campaign_date", { ascending: false })
@@ -719,7 +728,7 @@ async function queryPricingFromCrowdfundingOutcomes(
 
   if (error || !data) return [];
 
-  const rows = data as Array<Record<string, unknown>>;
+  const rows = data as unknown as Array<Record<string, unknown>>;
   return rows
     .filter((row) => {
       const company = row.companies as { sector?: string | null; country?: string | null } | null;
@@ -733,7 +742,13 @@ async function queryPricingFromCrowdfundingOutcomes(
     })
     .map((row) => {
       const company = row.companies as { source?: string | null; sector?: string | null; country?: string | null } | null;
-      const sourceTier = tierForCompanySource(company?.source);
+      const labelTier = (row.label_quality_tier as number | null) ?? 3;
+      let sourceTier = tierForCompanySource(company?.source);
+      if (labelTier >= 3) {
+        sourceTier = "C";
+      } else if (labelTier === 2 && sourceTier === "A") {
+        sourceTier = "B";
+      }
       return {
         key: `co:${String(row.id)}`,
         sector: company?.sector ?? null,

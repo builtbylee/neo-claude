@@ -192,6 +192,10 @@ def _compute_data_sufficiency(item: dict[str, Any]) -> dict[str, Any]:
         "pre_money_valuation": _has_value(item.get("pre_money_valuation")),
         "equity_offered": _has_value(item.get("equity_offered")),
         "instrument_type": _has_value(item.get("instrument_type")),
+        "core_term_completeness": (
+            (_safe_float(item.get("round_core_term_completeness")) or 0.0) >= 0.6
+        ),
+        "valuation_gate_pass": item.get("round_valuation_gate_pass") is True,
     }
     team_traction_fields = {
         "founder_count": _has_value(item.get("founder_count")),
@@ -394,6 +398,11 @@ def _build_context(item: dict[str, Any]) -> dict[str, Any]:
                 "qualified_institutional": item.get("qualified_institutional"),
                 "eis_seis_eligible": item.get("eis_seis_eligible"),
                 "qsbs_eligible": item.get("qsbs_eligible"),
+                "core_term_completeness": item.get("round_core_term_completeness"),
+                "conflict_count": item.get("round_conflict_count"),
+                "confidence_band": item.get("round_confidence_band"),
+                "valuation_gate_pass": item.get("round_valuation_gate_pass"),
+                "valuation_gate_reason": item.get("round_valuation_gate_reason"),
             },
         },
     }
@@ -781,17 +790,34 @@ def _cycle_items_query(
         rounds AS (
           SELECT
             ec.id AS item_id,
-            fr.round_date,
-            fr.round_type,
-            fr.instrument_type,
-            fr.amount_raised AS round_amount_raised,
-            fr.pre_money_valuation AS round_pre_money_valuation,
+            COALESCE(tr.round_date, fr.round_date) AS round_date,
+            COALESCE(tr.round_type, fr.round_type) AS round_type,
+            COALESCE(tr.instrument_type, fr.instrument_type) AS instrument_type,
+            COALESCE(tr.amount_raised, fr.amount_raised) AS round_amount_raised,
+            COALESCE(tr.pre_money_valuation, fr.pre_money_valuation) AS round_pre_money_valuation,
             fr.investor_count AS round_investor_count,
             fr.qualified_institutional,
             fr.eis_seis_eligible,
-            fr.qsbs_eligible
+            fr.qsbs_eligible,
+            tr.core_term_completeness AS round_core_term_completeness,
+            tr.conflict_count AS round_conflict_count,
+            tr.confidence_band AS round_confidence_band,
+            tr.valuation_gate_pass AS round_valuation_gate_pass,
+            tr.valuation_gate_reason AS round_valuation_gate_reason
           FROM enrichment_company ec
           LEFT JOIN campaign ca ON ca.item_id = ec.id
+          LEFT JOIN LATERAL (
+            SELECT tr.*
+            FROM transaction_rounds tr
+            WHERE tr.company_id = ec.company_id
+              AND (
+                ca.campaign_date IS NULL
+                OR tr.round_date IS NULL
+                OR tr.round_date <= ca.campaign_date
+              )
+            ORDER BY tr.round_date DESC NULLS LAST, tr.source_timestamp DESC NULLS LAST
+            LIMIT 1
+          ) tr ON true
           LEFT JOIN LATERAL (
             SELECT fr.*
             FROM funding_rounds fr
@@ -934,6 +960,11 @@ def _cycle_items_query(
           ro.qualified_institutional,
           ro.eis_seis_eligible,
           ro.qsbs_eligible,
+          ro.round_core_term_completeness,
+          ro.round_conflict_count,
+          ro.round_confidence_band,
+          ro.round_valuation_gate_pass,
+          ro.round_valuation_gate_reason,
           fin.financial_period_end_date,
           fin.revenue_growth_yoy,
           fin.employee_count,
