@@ -68,8 +68,22 @@ jobs:
             gh issue create --title "$TITLE" --label "ops-alert" --body "\`\`\`json\n$BODY\n\`\`\`"
           fi
 
-      - name: Fail workflow on active alerts
+      - name: Summarize active alerts
         if: steps.preflight.outputs.should_run == 'true' && steps.guardrails.outcome == 'failure'
         run: |
-          echo "Guardrail breaches detected."
-          exit 1
+          echo "## Ops Alerts detected" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Guardrail breaches were detected. Email delivery and GitHub issue notification have already been attempted." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the JSON payload below for details:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/ops_alerts.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summarize clean run
+        if: steps.preflight.outputs.should_run == 'true' && steps.guardrails.outcome != 'failure'
+        run: |
+          echo "## Ops Alerts clear" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "No active guardrail breaches were detected." >> "$GITHUB_STEP_SUMMARY"
